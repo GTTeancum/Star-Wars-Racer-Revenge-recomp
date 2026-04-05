@@ -1,0 +1,51 @@
+# Build
+build/
+out/
+*.obj
+*.exe
+*.pdb
+*.lib
+*.dll
+*.exp
+*.ilk
+
+# Generated recomp output
+src/generated/
+
+# Game assets (large, not for repo)
+assets/
+*.bin
+*.cue
+*.iso
+
+# PS2 ELF (user provides)
+SLUS_202.68
+
+# PCSX2 reference (huge)
+pcsx2-master/
+
+# CarsTools reference
+CarsTools/
+CarsTools.7z
+
+# Diagnostic scripts (old decomp work)
+diag_*.py
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+CMakeSettings.json
+
+# Claude
+.claude/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
