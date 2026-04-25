@@ -104,21 +104,93 @@ See `CMakeLists.txt` EXCLUDE_LARGE_FILES and `src/large_function_stubs.cpp`.
 Analyzer treats 0x31D200–0x3D5A00 (748KB) as one function. Likely runs into data segment.
 Skipped in TOML — generates 2.1GB C++ output otherwise.
 
-## Key ELF Functions (from previous analysis)
+## Key ELF Functions (discovered via runtime tracing and Ghidra analysis)
 
-| VA | Purpose |
-|---|---|
-| 0x00100008 | ELF entry point |
-| 0x002EFDD0 | Per-MB orchestrator (IPU decode) |
-| 0x002EFB20 | MB decode loop |
-| 0x002EF7D8 | Pre-orchestrator (addr_inc VLC) |
-| 0x002F0778 | VDEC (IPU VLC decode command) |
-| 0x002F47E8 | IPU_CTRL RST |
-| 0x0023F0C0 | Per-mip decompress trigger |
-| 0x0023A770 | IPU texture decompress orchestrator |
-| 0x00239C40 | Called from entry point |
-| 0x002FE7C0 | Called from entry point |
-| 0x002F5E20 | Called from entry point |
+### Boot Sequence
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x00100008 | `_start` | ELF entry — sets up $gp/stack, calls init chain, never returns |
+| 0x00239C40 | `boot_subinit` | Called from entry — early init (exact purpose TBD) |
+| 0x002F5E20 | `boot_init2` | Called from entry — early init (exact purpose TBD) |
+| 0x002FE7C0 | `boot_overlay_init` | Called from entry — triggers kernel overlay loader |
+| 0x002FE8D0 | `kernel_overlay_loader` | Copies 3 MIPS blobs into kseg0 via syscall 0x5A, then installs them as syscall handlers |
+
+### Game State Machine
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x002FDDF8 | `setGameState` | Writes frame-work fn ptr → 0x384670; installs EE exception save handlers 1-3 at 0x2FE300 |
+| 0x002FDE58 | `setStateHandler` | Writes handler ptr to `syscall_dispatch_table[id]` (table at 0x384678) |
+| 0x002FE400 | `frameDispatch` | Reads 0x384670, calls game state fn each VBlank (entered via `eret` on real HW) |
+| 0x00302DF0 | `moduleManager_mainLoop` | Game's infinite main loop: `moduleDispatch → userInit → repeat` |
+
+### Frame / GS Rendering
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x00251B10 | `gs_initState` | Per-frame render dispatch (interior entry in sub_00251A20). First call: initializes GS. Every call: invokes `gs_dispatchHelper` |
+| 0x00251DF0 | `vif1_frameSubmit` | Per-frame VIF1 DMA handler. Polls VIF1_MARK=1, submits DMA chain, clears VIF1_MARK |
+| 0x00257080 | `vif1_buildPacket` | Builds VIF1 DMA packet from GS state descriptors. Sets VIF1_MARK=1 on completion |
+| 0x00258E70 | `gs_waitCSRFinish` | Spins on GS_CSR FINISH bit (0x12001000 bit 1) until GS rendering completes |
+| 0x00133660 | `gs_dispatchHelper` | Reads `gs_subsystem_ready_flag`; if set and $a0=0, calls `module_renderPrep` + `vblank_waitGated` |
+| 0x001336C0 | `gs_renderHelper` | Helper called from `gs_dispatchHelper`; calls into render list management |
+| 0x003075A8 | `module_renderPrep` | Reads module table ptr, writes to sub-pointer+84, calls `renderList_manager` |
+| 0x0030B4F0 | `renderList_manager` | Render list / job queue manager; calls `renderList_init` if list is uninitialized |
+| 0x00304718 | `renderList_init` | Initializes render list (called from `renderList_manager` when list ptr is null) |
+
+### VBlank / Interrupts
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x002F6030 | `vblank_wait` | Clears INTC_STAT bit 2, spins until VSync worker sets it (fires every ~16.67ms) |
+| 0x002F60C0 | `vblank_waitCancellable` | VBlank wait with early-exit if a cancellation flag in $sp[0] is set |
+| 0x002EB0C8 | `vblank_waitGated` | Reads struct flag at 0x383768: if 0 → `vblank_wait`, if non-zero → `vblank_waitCancellable` |
+| 0x002FE660 | `disableInterrupts_check` | Checks COP0 Status bit 16 (EIE); loops `di` until clear. Returns 0 if already clear |
+
+### Custom Kernel / Syscalls
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x002FE100 | `ee_exceptionHandler` | Full EE exception/syscall dispatcher (0x2FE100–0x2FE660). Entry for all EE exceptions |
+| 0x002FE300 | `ee_exceptionSaveState` | Saves all GPRs into `exception_frame_buffer` (0x44BC80) via $k0. Installed for exception levels 1–3 |
+| 0x002FE440 | `exceptionReturn` | `iClearEventFlag` / `eret` handler installed via SetSyscall(0x54) |
+| 0x002F5850 | `setSyscall_wrapper` | 3-insn: `$v1=0xD; syscall 0; jr $ra` — game's custom SetSyscall-equivalent |
+| 0x002F5E50 | `syscall_noop` | Syscall -0x68 — no-op on both real HW and in recomp |
+| 0x002F68B0 | `memcpy_handler` | Syscall 0x5A handler: word-aligned memcpy |
+| 0x002FE820 | `memcpy_variant2` | Syscall 0x5A variant (second copy registered during overlay init) |
+| 0x002FDEF0 | `memcpy_variant3` | Syscall 0x5A variant (third copy) |
+| 0x002FE708 | `findAddress_handler` | Syscall 0x83 handler: scans memory for a target address |
+| 0x002EB050 | `getModuleStructPtr` | Returns hard-coded ptr 0x383760 (module state struct base) |
+
+### Threads
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x002F69D0 | `rpc_handlerThread` | Thread 2 entry: RPC command handler, blocks on semaphore 3 |
+| 0x002E9150 | `moduleMain` | Module main entry (interior label in sub_002E90F0) |
+
+### IPU / MPEG Decode
+
+| VA | Name | Purpose |
+|---|---|---|
+| 0x002EFDD0 | `ipu_perMB_orchestrator` | Per-macroblock IPU decode orchestrator |
+| 0x002EFB20 | `ipu_mb_decodeLoop` | Macroblock decode loop |
+| 0x002EF7D8 | `ipu_preOrchestrator` | Pre-orchestrator (addr_inc VLC) |
+| 0x002F0778 | `ipu_vdec` | IPU VLC decode command (VDEC) |
+| 0x002F47E8 | `ipu_ctrl_rst` | IPU_CTRL reset |
+| 0x0023F0C0 | `perMip_decompressTrigger` | Per-mip texture decompress trigger |
+| 0x0023A770 | `ipu_textureDecompOrchestrator` | IPU texture decompress orchestrator |
+
+### Kseg0 Kernel Overlays (runtime-loaded)
+
+Copied into kseg0 during boot by `kernel_overlay_loader`. Each is a small syscall dispatcher with an internal lookup table. All three are recompiled from their source VAs (via `[[overlays]]` in TOML) and run at native C++ speed.
+
+| Dest VA | Source VA | Size | Purpose |
+|---|---|---|---|
+| 0x80074000 | 0x003849A0 | 0x7A8 | Main syscall dispatcher. Table at +0x780 maps syscall_id → sub-handler |
+| 0x80075000 | 0x00384348 | 0x328 | Dispatcher for syscalls 0x55–0x59 |
+| 0x80076000 | 0x00383AD8 | 0x740 | Dispatcher for syscalls 0xFC–0xFF, 0x12C, 0x08 |
 
 ## Dependencies
 - **PS2Recomp** (submodule) — recompiler toolchain + runtime

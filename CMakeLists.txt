@@ -38,6 +38,7 @@ endforeach()
 # Our game executable
 add_executable(racer_revenge
     src/main.cpp
+    src/ps2_mips_interp.cpp
     ${GENERATED_SOURCES}
 )
 
@@ -46,15 +47,14 @@ if(CLANG_OBJS)
     target_link_libraries(racer_revenge PRIVATE ${CLANG_OBJS})
 endif()
 
-# If any large files don't have .obj, compile stubs
-if(NEED_STUBS)
-    target_sources(racer_revenge PRIVATE src/large_function_stubs.cpp)
-endif()
+# Always include stubs — covers deleted/missing large files that other functions reference
+target_sources(racer_revenge PRIVATE src/large_function_stubs.cpp)
 
 # Include paths
 target_include_directories(racer_revenge PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/PS2Recomp/ps2xRuntime/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/generated
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -63,7 +63,7 @@ target_link_libraries(racer_revenge PRIVATE ps2_runtime raylib)
 
 # MSVC settings
 if(MSVC)
-    target_compile_options(racer_revenge PRIVATE /MP /bigobj /FS)
+    target_compile_options(racer_revenge PRIVATE /MP2 /bigobj /FS)
     target_link_options(racer_revenge PRIVATE "/FORCE:MULTIPLE")
     foreach(src ${GENERATED_SOURCES})
         set_source_files_properties(${src} PROPERTIES COMPILE_FLAGS "/Od")

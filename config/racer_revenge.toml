@@ -3,13 +3,13 @@
 
 [general]
 # Path to input ELF file
-input = "D:/Programming/GitHub/Racer Revenge decomp/SLUS_202.68"
+input = "SLUS_202.68"
 
 # Path to Ghidra exported function map (optional CSV)
 ghidra_output = ""
 
 # Path to output directory
-output = "D:/Programming/GitHub/Racer Revenge decomp/src/generated/"
+output = "src/generated/"
 
 # Single file output mode (recommended for large games)
 single_file_output = false
@@ -25,7 +25,434 @@ stubs = [
 
 # Functions to skip (these will not be recompiled)
 skip = [
-
+  "sub_00100330",
+  "sub_00101A50",
+  "sub_001026D0",
+  "sub_00103280",
+  "sub_00107940",
+  "sub_00108E90",
+  "sub_0010A4F0",
+  "sub_0010B840",
+  "sub_0010E080",
+  "sub_0010F580",
+  "sub_001106B0",
+  "sub_001155C0",
+  "sub_00115EC0",
+  "sub_001169D0",
+  "sub_00118A10",
+  "sub_0011A4F0",
+  "sub_0011A5A0",
+  "sub_0011A750",
+  "sub_0011B190",
+  "sub_0011D040",
+  "sub_0011ED60",
+  "sub_001202E0",
+  "sub_00121920",
+  "sub_00122BA0",
+  "sub_00125890",
+  "sub_00126640",
+  "sub_00128930",
+  "sub_001299A0",
+  "sub_0012A120",
+  "sub_0012A510",
+  "sub_0012A730",
+  "sub_0012ACD0",
+  "sub_0012C540",
+  "sub_0012CEA0",
+  "sub_00130560",
+  "sub_00131B70",
+  "sub_00134B40",
+  "sub_00134CF0",
+  "sub_00135040",
+  "sub_001362A0",
+  "sub_001366B0",
+  "sub_00137BA0",
+  "sub_001392D0",
+  "sub_0013A880",
+  "sub_0013B530",
+  "sub_0013D0F0",
+  "sub_0013E920",
+  "sub_00144C60",
+  "sub_00147600",
+  "sub_00148110",
+  "sub_0014AD10",
+  "sub_0014BC30",
+  "sub_0014CF30",
+  "sub_0014EEC0",
+  "sub_001505C0",
+  "sub_00151920",
+  "sub_001536F0",
+  "sub_00154140",
+  "sub_00159580",
+  "sub_0015B9D0",
+  "sub_0015DEF0",
+  "sub_0015E8F0",
+  "sub_0015F1E0",
+  "sub_00160B10",
+  "sub_00162010",
+  "sub_00162230",
+  "sub_00162E70",
+  "sub_001635B0",
+  "sub_00164200",
+  "sub_00164AA0",
+  "sub_00164BA0",
+  "sub_00164CB0",
+  "sub_00164DD0",
+  "sub_00164ED0",
+  "sub_001659C0",
+  "sub_00165E90",
+  "sub_00167920",
+  "sub_00167A40",
+  "sub_00169870",
+  "sub_0016CCD0",
+  "sub_0016EDD0",
+  "sub_00173EB0",
+  "sub_001756D0",
+  "sub_00177AB0",
+  "sub_00179580",
+  "sub_00179D90",
+  "sub_0017A870",
+  "sub_0017C650",
+  "sub_0017DF80",
+  "sub_001800E0",
+  "sub_001866E0",
+  "sub_001891A0",
+  "sub_00189450",
+  "sub_0018AD90",
+  "sub_0018C6F0",
+  "sub_0018EAD0",
+  "sub_0018F750",
+  "sub_0018FF80",
+  "sub_00191290",
+  "sub_00193100",
+  "sub_00193BE0",
+  "sub_00195250",
+  "sub_00198CF0",
+  "sub_00199950",
+  "sub_0019A810",
+  "sub_0019BB70",
+  "sub_0019CD40",
+  "sub_0019DCD0",
+  "sub_0019ED20",
+  "sub_001A02C0",
+  "sub_001A0DA0",
+  "sub_001A3290",
+  "sub_001A3C00",
+  "sub_001A6180",
+  "sub_001A65C0",
+  "sub_001A9EE0",
+  "sub_001AA510",
+  "sub_001AB4F0",
+  "sub_001B1A30",
+  "sub_001B31D0",
+  "sub_001B3B80",
+  "sub_001B4CA0",
+  "sub_001B6200",
+  "sub_001B6670",
+  "sub_001B7140",
+  "sub_001B9220",
+  "sub_001BA130",
+  "sub_001BE940",
+  "sub_001BEEB0",
+  "sub_001C9B10",
+  "sub_001CADE0",
+  "sub_001CD160",
+  "sub_001CDCF0",
+  "sub_001CF630",
+  "sub_001D08E0",
+  "sub_001D31D0",
+  "sub_001D3800",
+  "sub_001D5320",
+  "sub_001D63B0",
+  "sub_001D8350",
+  "sub_001D8500",
+  "sub_001D8D70",
+  "sub_001DAB00",
+  "sub_001DD580",
+  "sub_001DDF00",
+  "sub_001E0650",
+  "sub_001E17D0",
+  "sub_001E33F0",
+  "sub_001E49C0",
+  "sub_001E5400",
+  "sub_001E7AC0",
+  "sub_001EBBF0",
+  "sub_001ED7E0",
+  "sub_001EEC40",
+  "sub_001F1D80",
+  "sub_001F2FD0",
+  "sub_001F46A0",
+  "sub_001F6880",
+  "sub_001F7500",
+  "sub_001F8DD0",
+  "sub_001F9FF0",
+  "sub_001FB0F0",
+  "sub_001FBE10",
+  "sub_001FF020",
+  "sub_001FF8B0",
+  "sub_00201970",
+  "sub_00203D40",
+  "sub_002055B0",
+  "sub_002060A0",
+  "sub_002076A0",
+  "sub_0020A000",
+  "sub_0020A9E0",
+  "sub_0020CA40",
+  "sub_0020D970",
+  "sub_0020F390",
+  "sub_00210770",
+  "sub_002146C0",
+  "sub_00216A30",
+  "sub_00217DE0",
+  "sub_002188B0",
+  "sub_00219810",
+  "sub_0021A660",
+  "sub_0021C120",
+  "sub_00223540",
+  "sub_00224720",
+  "sub_00225C50",
+  "sub_00228620",
+  "sub_0022D810",
+  "sub_0022E260",
+  "sub_0022F560",
+  "sub_00231370",
+  "sub_00231DF0",
+  "sub_00232830",
+  "sub_002329A0",
+  "sub_00232ED0",
+  "sub_00233F20",
+  "sub_00234980",
+  "sub_00234E50",
+  "sub_002350D0",
+  "sub_002361C0",
+  "sub_00237D00",
+  "sub_002389C0",
+  "sub_00239250",
+  "sub_0023A1C0",
+  "sub_0023A460",
+  "sub_0023BCA0",
+  "sub_0023CB20",
+  "sub_0023CCA0",
+  "sub_0023DD20",
+  "sub_0023EF60",
+  "sub_0023F0C0",
+  "sub_0023F560",
+  "sub_0023F6C0",
+  "sub_0023FA30",
+  "sub_002407E0",
+  "sub_00240A10",
+  "sub_002410F0",
+  "sub_00242360",
+  "sub_00242A50",
+  "sub_00242D60",
+  "sub_00242EE0",
+  "sub_00243A80",
+  "sub_00243C80",
+  "sub_00243F00",
+  "sub_00244940",
+  "sub_00245290",
+  "sub_002469C0",
+  "sub_00246AF0",
+  "sub_00246D00",
+  "sub_00246DB0",
+  "sub_002476A0",
+  "sub_002480D0",
+  "sub_00249420",
+  "sub_0024BA50",
+  "sub_0024C160",
+  "sub_0024C2A0",
+  "sub_0024C670",
+  "sub_0024E1B0",
+  "sub_0024ED50",
+  "sub_00250900",
+  "sub_00256390",
+  "sub_0025D2F0",
+  "sub_0025DBB0",
+  "sub_0025E610",
+  "sub_0025EB70",
+  "sub_0025F520",
+  "sub_00260850",
+  "sub_00261630",
+  "sub_002623E0",
+  "sub_00262830",
+  "sub_00263BF0",
+  "sub_00265BB0",
+  "sub_00268930",
+  "sub_00269650",
+  "sub_0026B5E0",
+  "sub_0026FC90",
+  "sub_0026FD80",
+  "sub_002742F0",
+  "sub_00275C50",
+  "sub_00276B30",
+  "sub_00277220",
+  "sub_0027C430",
+  "sub_0027E9D0",
+  "sub_0027F120",
+  "sub_0027F650",
+  "sub_00280230",
+  "sub_00283CF0",
+  "sub_002845D0",
+  "sub_00285830",
+  "sub_002893A0",
+  "sub_0028EB90",
+  "sub_0028F580",
+  "sub_0028FF30",
+  "sub_0028FFD0",
+  "sub_00290F10",
+  "sub_002921C0",
+  "sub_002928B0",
+  "sub_00293510",
+  "sub_002953A0",
+  "sub_00297610",
+  "sub_00299DF0",
+  "sub_0029C6E0",
+  "sub_0029C850",
+  "sub_0029CA40",
+  "sub_002A0290",
+  "sub_002A04B0",
+  "sub_002A1260",
+  "sub_002A3AD0",
+  "sub_002A5CF0",
+  "sub_002A85F0",
+  "sub_002A9000",
+  "sub_002ABC50",
+  "sub_002AC1E0",
+  "sub_002AC590",
+  "sub_002ACF00",
+  "sub_002ACFE0",
+  "sub_002AE080",
+  "sub_002AEF70",
+  "sub_002AF3C0",
+  "sub_002B0800",
+  "sub_002B1E60",
+  "sub_002B3DC0",
+  "sub_002B43B0",
+  "sub_002B46D0",
+  "sub_002B4970",
+  "sub_002B5710",
+  "sub_002B75A0",
+  "sub_002B80D0",
+  "sub_002B8370",
+  "sub_002B8F90",
+  "sub_002BC3C0",
+  "sub_002BD9F0",
+  "sub_002BE250",
+  "sub_002C1170",
+  "sub_002C2F30",
+  "sub_002C3830",
+  "sub_002C51D0",
+  "sub_002C5730",
+  "sub_002C6EA0",
+  "sub_002C96A0",
+  "sub_002C9E40",
+  "sub_002CA840",
+  "sub_002CB5A0",
+  "sub_002CC060",
+  "sub_002CD180",
+  "sub_002CDAD0",
+  "sub_002CEDB0",
+  "sub_002D0290",
+  "sub_002D0C80",
+  "sub_002D30B0",
+  "sub_002D3B10",
+  "sub_002D3E60",
+  "sub_002D42C0",
+  "sub_002D5890",
+  "sub_002D8640",
+  "sub_002DA0B0",
+  "sub_002DD790",
+  "sub_002DE230",
+  "sub_002DF0B0",
+  "sub_002E03F0",
+  "sub_002E27C0",
+  "sub_002E2ED0",
+  "sub_002E3E60",
+  "sub_002E5360",
+  "sub_002E6060",
+  "sub_002E6650",
+  "sub_002E6E90",
+  "sub_002E8190",
+  "sub_002E9D10",
+  "sub_002EAEC0",
+  "sub_002EB060",
+  "sub_002EB1C0",
+  "sub_002EB2B0",
+  "sub_002EC598",
+  "sub_002EC698",
+  "sub_002ED668",
+  "sub_002ED6D0",
+  "sub_002EE448",
+  "sub_002EF418",
+  "sub_002EF440",
+  "sub_002EF8E8",
+  "sub_002EFDD0",
+  "sub_002F05F0",
+  "sub_002F0620",
+  "sub_002F06C8",
+  "sub_002F0778",
+  "sub_002F08F0",
+  "sub_002F09F8",
+  "sub_002F0AE8",
+  "sub_002F0C38",
+  "sub_002F0EF8",
+  "sub_002F1A78",
+  "sub_002F2168",
+  "sub_002F22C0",
+  "sub_002F2330",
+  "sub_002F25C0",
+  "sub_002F2878",
+  "sub_002F3B08",
+  "sub_002F4138",
+  "sub_002F4748",
+  "sub_002F4850",
+  "sub_002F4E68",
+  "sub_002F5160",
+  "sub_002F51C8",
+  "sub_002F5468",
+  "sub_002F54D0",
+  "sub_002F5538",
+  "sub_002F6020",
+  # "sub_002F6030",  # un-stubbed: GIF submit path A (called by sub_002EB0C8 when GS state flag=0)
+  # "sub_002F60C0",  # un-stubbed: GIF submit path B (called by sub_002EB0C8 when GS state flag!=0)
+  "sub_002F7E20",
+  "sub_002F80A0",
+  "sub_002F8690",
+  "sub_002F9450",
+  "sub_002F94B0",
+  "sub_002F9D10",
+  "sub_002FCAE8",
+  "sub_002FCEE8",
+  "sub_00304C20",
+  "sub_003110A0",
+  "sub_00311438",
+  "sub_003114D0",
+  "sub_00311600",
+  "sub_00311968",
+  "sub_00311C80",
+  "sub_00311DF0",
+  "sub_003123C0",
+  "sub_003126F0",
+  "sub_003127A8",
+  "sub_003127D8",
+  "sub_00312870",
+  "sub_003128A8",
+  "sub_00312EE0",
+  "sub_00314020",
+  "sub_00314380",
+  "sub_003144B8",
+  "sub_003144F0",
+  "sub_00314710",
+  "sub_00314830",
+  "sub_00314B58",
+  "sub_00314CE0",
+  "sub_00314EC0",
+  "sub_00315010",
+  "sub_003150D8",
+  "sub_00316B40",
+  "sub_00317860",
+  "sub_00318880",
+  "sub_0031D200",
 ]
 
 # Detected MMIO accesses
@@ -416,7 +843,7 @@ critical = [
   "sub_00102890", # Uses SIMD instructions
   "sub_001028F0", # Uses SIMD instructions
   "sub_00102950", # Uses SIMD instructions
-  "sub_00102BE0", # Uses SIMD instructions
+  # "sub_00102BE0", # un-skipped: called by sub_0013FDA0 (gsState init)
   "sub_00102DE0", # Uses SIMD instructions
   "sub_00102F10", # Uses SIMD instructions
   "sub_00103040", # Uses SIMD instructions
@@ -749,8 +1176,7 @@ critical = [
   "sub_0013F980", # Uses SIMD instructions
   "sub_0013F9C0", # Uses SIMD instructions
   "sub_0013FB30", # Uses SIMD instructions
-  "sub_0013FDA0", # Uses SIMD instructions
-  "sub_00140D70", # Uses SIMD instructions
+  # "sub_00140D70", # un-skipped: called by sub_0013FDA0 (gsState init)
   "sub_00140EF0", # Uses SIMD instructions
   "sub_00140FD0", # Uses SIMD instructions
   "sub_00141300", # Uses SIMD instructions
@@ -813,7 +1239,7 @@ critical = [
   "sub_00146F60", # Uses SIMD instructions
   "sub_001474A0", # Uses SIMD instructions
   "sub_00147600", # Uses SIMD instructions
-  "sub_00147ED0", # Uses SIMD instructions
+  # "sub_00147ED0", # un-skipped: called by sub_0013FDA0 (gsState init)
   "sub_00148110", # Uses SIMD instructions
   "sub_00148B60", # Uses SIMD instructions
   "sub_00148D00", # Uses SIMD instructions
@@ -1666,7 +2092,6 @@ critical = [
   "sub_00237D00", # Uses SIMD instructions
   "sub_002389C0", # Uses SIMD instructions
   "sub_00239250", # Uses SIMD instructions
-  "sub_00239C40", # Uses SIMD instructions
   "sub_0023A1C0", # Uses SIMD instructions
   "sub_0023A460", # Uses SIMD instructions
   "sub_0023AB00", # Uses SIMD instructions
@@ -1820,18 +2245,18 @@ critical = [
   "sub_00252EA0", # Uses SIMD instructions
   "sub_00252FA0", # Uses SIMD instructions
   "sub_00253080", # Uses SIMD instructions
-  "sub_002531E0", # Uses SIMD instructions
+  # "sub_002531E0", # un-skipped: gsState init path
   "sub_002533E0", # Uses SIMD instructions
   "sub_00253850", # Uses SIMD instructions
   "sub_002539C0", # Uses SIMD instructions
   "sub_00253A90", # Uses SIMD instructions
   "sub_00253B60", # Uses SIMD instructions
   "sub_00253C90", # Uses SIMD instructions
-  "sub_00253D80", # Uses SIMD instructions
+  # "sub_00253D80", # un-skipped: gsState initializer
   "sub_002542F0", # Uses SIMD instructions
   "sub_002543F0", # Uses SIMD instructions
   "sub_00254440", # Uses SIMD instructions
-  "sub_002544F0", # Uses SIMD instructions
+  # "sub_002544F0", # un-skipped: rendering path
   "sub_00255830", # Uses SIMD instructions
   "sub_002559D0", # Uses SIMD instructions
   "sub_00255EA0", # Uses SIMD instructions
@@ -1845,9 +2270,9 @@ critical = [
   "sub_00256DD0", # Uses SIMD instructions
   "sub_00256F60", # Uses SIMD instructions
   "sub_00257080", # Uses SIMD instructions
-  "sub_00257210", # Uses SIMD instructions
+  # "sub_00257210", # un-skipped: rendering path
   "sub_00257450", # Uses SIMD instructions
-  "sub_002574F0", # Uses SIMD instructions
+  # "sub_002574F0", # un-skipped: rendering path
   "sub_00257740", # Uses SIMD instructions
   "sub_00257750", # Uses SIMD instructions
   "sub_00257820", # Uses SIMD instructions
@@ -1860,8 +2285,8 @@ critical = [
   "sub_00258480", # Uses SIMD instructions
   "sub_002586C0", # Uses SIMD instructions
   "sub_00258900", # Uses SIMD instructions
-  "sub_00258C70", # Uses SIMD instructions
-  "sub_00258E70", # Uses SIMD instructions
+  # "sub_00258C70", # un-skipped: rendering path
+  # "sub_00258E70", # un-skipped: GS display setup
   "sub_00259180", # Uses SIMD instructions
   "sub_002591D0", # Uses SIMD instructions
   "sub_00259230", # Uses SIMD instructions
@@ -1874,19 +2299,19 @@ critical = [
   "sub_002595D0", # Uses SIMD instructions
   "sub_00259610", # Uses SIMD instructions
   "sub_00259630", # Uses SIMD instructions
-  "sub_002596A0", # Uses SIMD instructions
-  "sub_00259A40", # Uses SIMD instructions
+  # "sub_002596A0", # un-skipped: IPU DMA submission (called by func_257080)
+  # "sub_00259A40", # un-skipped: rendering path
   "sub_00259E00", # Uses SIMD instructions
-  "sub_0025A3E0", # Uses SIMD instructions
+  # "sub_0025A3E0", # un-skipped: rendering path
   "sub_0025A710", # Uses SIMD instructions
   "sub_0025A900", # Uses SIMD instructions
-  "sub_0025A9C0", # Uses SIMD instructions
-  "sub_0025AFB0", # Uses SIMD instructions
+  # "sub_0025A9C0", # un-skipped: rendering path
+  # "sub_0025AFB0", # un-skipped: rendering path
   "sub_0025B1A0", # Uses SIMD instructions
-  "sub_0025B200", # Uses SIMD instructions
-  "sub_0025B5D0", # Uses SIMD instructions
+  # "sub_0025B200", # un-skipped: rendering path
+  # "sub_0025B5D0", # un-skipped: rendering path
   "sub_0025B9F0", # Uses SIMD instructions
-  "sub_0025BBC0", # Uses SIMD instructions
+  # "sub_0025BBC0", # un-skipped: rendering path
   "sub_0025BE80", # Uses SIMD instructions
   "sub_0025C0A0", # Uses SIMD instructions
   "sub_0025C5C0", # Uses SIMD instructions
@@ -2908,4 +3333,79 @@ critical = [
   "sub_0031D130", # Uses SIMD instructions
   "sub_0031D200", # Uses SIMD instructions
 ]
+
+
+# ---- Preserved across analyzer re-runs ----
+# (non-analyzer-owned top-level keys from the previous file)
+
+
+[[overlays]]
+source_va = "0x003849A0"
+dest_va = "0x80074000"
+size = "0x7A8"
+name = "overlay_kernel_74"
+[[overlays]]
+source_va = "0x00384348"
+dest_va = "0x80075000"
+size = "0x328"
+name = "overlay_kernel_75"
+[[overlays]]
+source_va = "0x00383AD8"
+dest_va = "0x80076000"
+size = "0x740"
+name = "overlay_kernel_76"
+
+
+
+[[extra_entry_points]]
+address = "0x2F7468"
+[[extra_entry_points]]
+address = "0x2F7518"
+[[extra_entry_points]]
+address = "0x2F68B0"
+[[extra_entry_points]]
+address = "0x2FE820"
+[[extra_entry_points]]
+address = "0x2FDEF0"
+[[extra_entry_points]]
+address = "0x2FE708"
+[[extra_entry_points]]
+address = "0x308DF8"
+[[extra_entry_points]]
+address = "0x30451C"
+[[extra_entry_points]]
+address = "0x2FDDF8"  # setGameState — interior label inside sub_002FDCE8
+[[extra_entry_points]]
+address = "0x2F69D0"  # Thread 2 RPC handler entry inside sub_002F68F8
+[[extra_entry_points]]
+address = "0x2E921C"  # jalr return address in callback dispatch loop at entry_2e91f0
+[[extra_entry_points]]
+address = "0x251B10"  # GS init render function — interior label inside sub_00251A20
+
+# Interior syscall handlers inside kseg0 overlays. These addresses are
+# installed via SetSyscall but not reachable via direct jal, so the T6
+# overlay-auto-extras pass doesn't see them. Without these entries each
+# handler isn't a standalone recompiled function — the runtime's
+# kseg0-fallback dispatcher then treats them as failed lookups.
+#
+# 0x56 = TLBWI (critical — the game TLB-inits in a loop at boot). Before
+# registering, syscall 0x56 silently returned 0 and the TLB was never
+# programmed, which cascaded into the main thread exiting.
+[[extra_entry_points]]
+address = "0x80075038"  # syscall 0x55
+[[extra_entry_points]]
+address = "0x800750C8"  # syscall 0x56 — TLBWI
+[[extra_entry_points]]
+address = "0x80075108"  # syscall 0x57
+[[extra_entry_points]]
+address = "0x800751A8"  # syscall 0x59
+[[extra_entry_points]]
+address = "0x800762A0"  # syscalls 0xFD / 0xFF
+[[extra_entry_points]]
+address = "0x80076440"  # syscalls 0xFC / 0xFE
+[[extra_entry_points]]
+address = "0x80076488"  # syscall 0x12C
+[[extra_entry_points]]
+address = "0x800766C0"  # syscall 0x08
+
 

@@ -1,0 +1,305 @@
+# Memory map — documented addresses and their meanings.
+#
+# This file is the canonical table of "what lives at what address" for
+# Racer Revenge, sourced from a combination of:
+#   - xref database findings (build/xref/globals.json)
+#   - manual reverse-engineering (Ghidra decompilations, runtime traces)
+#   - PS2 hardware/IO register conventions
+#
+# Consumed by tools/xref/query.py (adds symbolic names to output) and by
+# runtime watchpoint config. Keep entries sorted by address.
+#
+# Schema per entry:
+#   [[entries]]
+#   address = "0xXXXXXXXX"    # absolute guest address
+#   name    = "..."           # short symbolic name, C-identifier style
+#   width   = 4               # bytes (1/2/4/8/0x1000 etc.)
+#   desc    = "..."           # one-line description
+#   tags    = ["state","gs"]  # free-form tags
+#
+# A range entry uses `end` instead of `width`:
+#   [[entries]]
+#   address = "0xXXXXXXXX"
+#   end     = "0xYYYYYYYY"
+#   name    = "..."
+#   desc    = "..."
+
+# ------------------------------------------------------------------------
+# Game state machine (EE data segment, 0x380000+)
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x00384670"
+name    = "game_state_fn"
+width   = 4
+desc    = "Current frame-work function pointer. Read each VBlank by frame dispatch at 0x2FE400; written by setGameState (0x2FDDF8)."
+tags    = ["state_machine", "frame"]
+
+[[entries]]
+address = "0x00384678"
+end     = "0x003846F8"
+name    = "syscall_dispatch_table"
+desc    = "EE custom kernel syscall handler table. Indexed by (syscall_id & 0x7C) / 4. Read by the EE exception dispatcher at 0x2FE648."
+tags    = ["state_machine", "kernel"]
+
+[[entries]]
+address = "0x003846B8"
+end     = "0x003846E0"
+name    = "syscall_install_table"
+desc    = "Contiguous handler install list iterated by entry_2fdf48 during boot (reads at 0x2FDFxx). 9 word-sized entries."
+tags    = ["kernel", "boot"]
+
+[[entries]]
+address = "0x00384988"
+width   = 4
+desc    = "Some value loaded during entry_2fe750's SetSyscall sequence"
+tags    = ["kernel"]
+
+[[entries]]
+address = "0x0038499C"
+width   = 4
+desc    = "Stored by entry_2fe790; part of kernel setup state"
+tags    = ["kernel"]
+
+# ------------------------------------------------------------------------
+# Module / render state
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x00383760"
+width   = 0x20
+name    = "module_struct"
+desc    = "Module state struct base. Returned hard-coded by getModuleStructPtr (0x2EB050). Field at +8 (0x383768) controls VBlank wait routing."
+tags    = ["module", "render"]
+
+[[entries]]
+address = "0x00383768"
+width   = 4
+name    = "module_struct.vblank_mode"
+desc    = "If 0 → vblank_wait (0x2F6030); if non-zero → vblank_waitCancellable (0x2F60C0). Read by vblank_waitGated (0x2EB0C8) each frame."
+tags    = ["module", "render"]
+
+[[entries]]
+address = "0x0038544C"
+width   = 4
+name    = "module_table_ptr"
+desc    = "Pointer to the module table base (= 0x385160 post-boot). Read by module_renderPrep (0x3075A8) and renderList_manager (0x30B4F0)."
+tags    = ["module"]
+
+[[entries]]
+address = "0x00385148"
+width   = 0x40
+name    = "kernel_descriptor_table"
+desc    = "Boot descriptor table consumed by kernel_overlay_loader (0x2FE8D0). Each entry is (syscall_id, handler_va) pairs; drives overlay memcpy + SetSyscall sequence."
+tags    = ["kernel", "boot"]
+
+[[entries]]
+address = "0x00385160"
+name    = "module_table"
+width   = 4
+desc    = "Module table base address. Contains module state block pointer at +0x1D4 (= 0x385334). Module callbacks read/write through here."
+tags    = ["module"]
+
+[[entries]]
+address = "0x00385168"
+width   = 4
+name    = "module_sub_ptr"
+desc    = "Sub-pointer within the module table region. Written to by module_renderPrep (0x3075A8) at offset +84."
+tags    = ["module", "render"]
+
+[[entries]]
+address = "0x00385334"
+width   = 4
+name    = "module_state_block_ptr"
+desc    = "Pointer to the 128-byte module state block (32 × 4-byte slots). Each non-zero slot is called by the module status checker (0x308B00) and cleared. Bootstrap pre-allocates this at 0x44E000."
+tags    = ["module"]
+
+[[entries]]
+address = "0x0036C100"
+width   = 4
+name    = "gs_subsystem_ready_flag"
+desc    = "Read by gs_dispatchHelper (0x133660). If 0: return immediately (GS not ready). If non-zero + $a0=0: call module_renderPrep + vblank_waitGated. Written to 1 by the game after IOP module init completes."
+tags    = ["gs_state", "module"]
+
+[[entries]]
+address = "0x003D6324"
+width   = 1
+name    = "gs_init_once_flag"
+desc    = "At gp-0x764C. Set to 1 by gs_initState (0x251B10) on its first call; checked to prevent re-running GS hardware init. Zero-initialized (BSS)."
+tags    = ["gs_state"]
+
+# ------------------------------------------------------------------------
+# GS subsystem
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x00442B70"
+name    = "gs_init_flag"
+width   = 4
+desc    = "Set to 1 by entry_251a20 on first GS init. Checked by the GS init function to short-circuit re-entry."
+tags    = ["gs_state"]
+
+[[entries]]
+address = "0x00443870"
+name    = "gs_state_ptr"
+width   = 4
+desc    = "Pointer to the GS state structure (framebuffer descriptors, display buffer array, mode). Allocated by entry_13fda0_0x140230. 66 readers across the GS code."
+tags    = ["gs_state"]
+
+# ------------------------------------------------------------------------
+# Hotspot state (top write addresses from xref --top-writers)
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x003D6B20"
+name    = "hot_state_a"
+width   = 4
+desc    = "Top write hotspot (320 writers across 24 functions). Purpose TBD — likely a main state/flags struct field. Worth a watchpoint."
+tags    = ["hot_state", "unclassified"]
+
+[[entries]]
+address = "0x003D6B30"
+name    = "hot_state_b"
+width   = 4
+desc    = "Adjacent to hot_state_a (152 writers)."
+tags    = ["hot_state", "unclassified"]
+
+[[entries]]
+address = "0x003D6B38"
+name    = "hot_state_c"
+width   = 4
+desc    = "Adjacent to hot_state_a (76 writers)."
+tags    = ["hot_state", "unclassified"]
+
+[[entries]]
+address = "0x00435368"
+width   = 4
+desc    = "GS-adjacent state, 51 writers. Likely part of the GS command-buffer/descriptor system (written by the GS allocator)."
+tags    = ["gs_state", "hot_state"]
+
+[[entries]]
+address = "0x00435370"
+width   = 8
+desc    = "Companion to 0x435368 (100 writers). 8-byte stores suggest a 64-bit pointer or timestamp."
+tags    = ["gs_state", "hot_state"]
+
+# ------------------------------------------------------------------------
+# Bootstrap-written flags (pre-set by main.cpp before game code runs)
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x00442FB8"
+width   = 4
+name    = "vif1_gate_flag"
+desc    = "Must be 1 for vif1_buildPacket (0x257080) to proceed. Zero in BSS; bootstrap writes 1 at startup. On real PS2 this is set by IOP module init."
+tags    = ["gs_state", "vif"]
+
+[[entries]]
+address = "0x00443DC8"
+width   = 4
+name    = "gs_gate_flag"
+desc    = "Gate in gs_initState (0x251B10): $a0 = sltiu(value, 1). If value >= 1, $a0=0 → gate passes → gs_dispatchHelper called. Bootstrap writes 1. On real PS2, set by GS subsystem init after IOP ready."
+tags    = ["gs_state"]
+
+[[entries]]
+address = "0x00442F70"
+width   = 4
+name    = "vif1_state_ptr"
+desc    = "Pointer dereferenced by vif1_buildPacket (0x257080) gate: READ32(READ32(442F70) + 0x44). If result is 0, packet builder exits early. Null in BSS; requires IOP init to populate."
+tags    = ["gs_state", "vif"]
+
+[[entries]]
+address = "0x00443870"
+name    = "gs_state_ptr"
+width   = 4
+desc    = "Pointer to the GS state structure (framebuffer descriptors, display buffer array, video mode). Allocated by entry_13fda0_0x140230 (GS state allocator). 66 readers across the GS subsystem. Bootstrap pre-allocates at 0x44C800."
+tags    = ["gs_state"]
+
+[[entries]]
+address = "0x0044C800"
+width   = 0x200
+name    = "gs_state_struct"
+desc    = "Pre-allocated GS state structure (bootstrap). +0x80: video mode (2 = NTSC interlaced). +0x144: display buffer descriptor array ptr. +0x148: current buffer index. Real game populates this via entry_13fda0_0x140230."
+tags    = ["gs_state"]
+
+# ------------------------------------------------------------------------
+# Thread / kernel buffers
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x0038428C"
+width   = 4
+name    = "tlb_callback_ptr"
+desc    = "TLB callback function pointer. Written by entry_2f7d48 (TLB-related code). Called from multiple jalr sites in the 0x2F7xxx range. Surfaced by indirect-target xref analysis."
+tags    = ["kernel"]
+
+[[entries]]
+address = "0x0044BC80"
+width   = 0x200
+name    = "exception_frame_buffer"
+desc    = "$k0-based EE exception save-state frame. Populated by ee_exceptionSaveState (0x2FE300), installed as handler for EE exception levels 1/2/3. Also used as $sp for the game frame loop."
+tags    = ["kernel", "thread"]
+
+# ------------------------------------------------------------------------
+# PS2 hardware (informational — not tracked by xref)
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x10000000"
+end     = "0x10008000"
+name    = "ee_timer_regs"
+desc    = "EE Timer 0-3 control registers."
+tags    = ["hw"]
+
+[[entries]]
+address = "0x10008000"
+end     = "0x1000A000"
+name    = "vif_regs"
+desc    = "VIF0/VIF1 control registers."
+tags    = ["hw"]
+
+[[entries]]
+address = "0x1000A000"
+end     = "0x1000F000"
+name    = "dma_regs"
+desc    = "DMA channel registers (9 channels)."
+tags    = ["hw", "dma"]
+
+[[entries]]
+address = "0x1000F000"
+end     = "0x10010000"
+name    = "ee_intc_sif_regs"
+desc    = "EE INTC + SIF control regs."
+tags    = ["hw"]
+
+[[entries]]
+address = "0x12000000"
+end     = "0x14000000"
+name    = "gs_priv_regs"
+desc    = "GS privileged registers (PMODE, SMODE1/2, DISPFB1/2, DISPLAY1/2, BGCOLOR, CSR, ...)."
+tags    = ["hw", "gs"]
+
+# ------------------------------------------------------------------------
+# Overlays (runtime-loaded kernel code in kseg0)
+# ------------------------------------------------------------------------
+
+[[entries]]
+address = "0x80074000"
+end     = "0x800747A8"
+name    = "overlay_kernel_74"
+desc    = "Custom kernel dispatcher. Table at +0x780 maps syscall_id -> sub-handler. Installed as handler for various syscalls during boot."
+tags    = ["kernel", "overlay"]
+
+[[entries]]
+address = "0x80075000"
+end     = "0x80075328"
+name    = "overlay_kernel_75"
+desc    = "Custom kernel dispatcher; handles syscalls 0x55-0x59."
+tags    = ["kernel", "overlay"]
+
+[[entries]]
+address = "0x80076000"
+end     = "0x80076740"
+name    = "overlay_kernel_76"
+desc    = "Custom kernel dispatcher; handles syscalls 0xFC-0xFF, 0x12C, 0x08."
+tags    = ["kernel", "overlay"]

@@ -49,3 +49,17 @@ CMakeSettings.json
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Logs and runtime output
+*.log
+build_log.txt
+run_output.txt
+
+# Disc / game content (user-provided, not for repo)
+disc_files/
+
+# Ghidra project files (large, user-specific)
+ghidra_project/
+
+# Generated config output from recompiler tool
+config/output/
