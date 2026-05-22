@@ -826,6 +826,27 @@ observe what the real game does, or (b) implementing enough of the
 IOP RPC to let sub_2531E0 → sub_237640 → sub_13FDA0 complete its
 boot-time install of the syscall handlers.
 
+## [2026-05-22 14:15] Cycle 21-22: smoke log volume dropped
+
+**Type:** result
+**Cycle:** 22
+
+After cycles 16-17's SIF dispatcher wiring + 21's 0x2F57C0 noop,
+the smoke log is now extremely quiet:
+- 198 lines total (was 234,175 lines in cycle 3 no-throw experiment)
+- 3 Warning/Error lines
+- 2 recover-pc events (both for bogus addresses 0x20676e69 / 0xa65
+  from junk register values — not real function pointers, recovery
+  via $ra=0x251f88 works cleanly)
+
+This is a meaningful infrastructure improvement: smoke test output
+is now signal-only. Future debugging will be much easier — actual
+issues won't be hidden in syscall warning floods.
+
+Smoke test: still 20/20 PASS. Boot thread state unchanged
+(parked at 0x239d2c per sampler), but the recovery cycles that
+were burning CPU are minimized.
+
 ## [2026-05-22 14:00] Cycle 19-20: dispatch trace shows recovery cycles, not stable hang
 
 **Type:** result
