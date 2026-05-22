@@ -466,7 +466,44 @@ Next moves (in priority order):
    render-list bootstrap from the C++ side if the IOP module path is
    genuinely unreachable.
 
-## [2026-05-21 23:55] SESSION PAUSE
+## [2026-05-22 02:30] VIF1_MARK trace — render-list pointer never set
+
+**Type:** result
+**Cycle:** 2
+
+Why is `VIF1_MARK=0` every frame even though state func runs?
+
+- `sub_257080` (`vif1_buildPacket` per CLAUDE.md) IS the VIF1 packet
+  builder. Its only "gate" is a buffer selector at 0x2570ac (chooses
+  between 0x435A04 and 0x43A808 based on `mem[mem[0x442F70]+0x44]==1`),
+  not a hard exit. Both branches continue.
+- The function ends at 0x257204 (`jr $ra`, `$v0 = 1`). Does NOT itself
+  write VIF1_MARK. Calls `func_2596A0(...)` at 0x2571e4 — probably the
+  actual mark-setter.
+- But the FRAMEDIAG shows VIF1_MARK stays 0. So either (a) sub_257080
+  is never called, or (b) func_2596A0 is short-circuited.
+- The 0x442F70 pointer that selects the buffer is still 0 — would
+  normally be populated by `sub_0013FDA0:0x14018c` (the one writer that
+  stores a real ptr; the other 4 writers clear it). 0x13FDA0 lives deep
+  in the boot-time module init path and never executes in our boot
+  sequence.
+
+So the per-frame chain reaches the GS dispatcher but the render-list
+root is unallocated. The game expects an IOP-loaded GFX module to call
+`sub_0013FDA0` (or its parent) at boot to populate the render-list
+pointer. We don't have IOP RPC, so that path is dark.
+
+Two ways forward, neither cheap:
+1. Trace the call chain into `sub_0013FDA0` and find a C++-side
+   bootstrap point that can fake the populated state.
+2. Implement minimum-viable IOP RPC for the GFX module — substantial
+   plumbing in `ps2xRuntime/src/lib/Kernel/Stubs/`.
+
+Either reveals new sub-blockers (the background thread parked at
+0x239d2c is one). The shortest path to actual game polygons is still
+many hours of RE work.
+
+## [2026-05-22 02:35] SESSION PAUSE
 
 **Type:** session-marker
 **Cycle:** 2
