@@ -213,6 +213,39 @@ def emit_register_file(addr_to_owner: dict[int, int], output: Path) -> None:
     output.write_text("\n".join(lines), encoding="utf-8")
 
 
+SWITCH_CASE_RE = re.compile(r"^\s*case 0x([0-9a-fA-F]+)u: goto label_[0-9a-fA-F]+;", re.M)
+
+
+def harvest_all_interior_labels(generated_dir: Path) -> dict[int, int]:
+    """Scan every generated function .cpp for `case 0xXXX: goto label_XXX;`
+    entries. Each such case is an interior address that JR / JALR can
+    legitimately target — but lookupFunction only knows the function-start
+    addresses. Result is a dict mapping interior addr → containing
+    function start addr.
+
+    This catches the common pattern of `jal func_X` setting $ra to an
+    interior label, and the dispatcher then failing to resolve the
+    interior address when func_X returns. Each entry will be emitted as
+    a trampoline so the dispatcher routes the interior address through
+    the containing function's switch prologue.
+    """
+    result: dict[int, int] = {}
+    for cpp in sorted(generated_dir.glob("sub_*.cpp")):
+        text = cpp.read_text(encoding="utf-8")
+        m = ADDRESS_LINE_RE.search(text)
+        if not m:
+            continue
+        start = int(m.group(1), 16)
+        for cm in SWITCH_CASE_RE.finditer(text):
+            addr = int(cm.group(1), 16)
+            if addr == start:
+                continue
+            # Last writer wins, but each interior label should belong to
+            # exactly one function so this is functionally deterministic.
+            result[addr] = start
+    return result
+
+
 def main() -> int:
     if not TOML_PATH.exists():
         print(f"missing TOML: {TOML_PATH}", file=sys.stderr)
@@ -262,9 +295,25 @@ def main() -> int:
             patched += 1
             print(f"  patched {path.name}: {[hex(a) for a in addr_list]}")
 
-    emit_register_file(addr_to_owner, REGISTER_OUTPUT)
+    # Also harvest every interior label across all generated .cpp files
+    # and emit trampolines for them. This catches the common pattern of
+    # `jal func_X` setting $ra to an interior label of func_X, then the
+    # dispatcher failing to resolve that interior address when func_X
+    # returns via `jr $ra`. Without these trampolines, the unimplemented-
+    # function default kicks in and loops on ctx->pc=ra forever (verified
+    # via PC sampler — see WORKLOG cycle 3).
+    all_interior = harvest_all_interior_labels(GENERATED_DIR)
+    merged_addr_to_owner = dict(addr_to_owner)
+    for addr, owner in all_interior.items():
+        # Don't clobber explicit TOML extra_entry_points (their owner is
+        # already settled).
+        merged_addr_to_owner.setdefault(addr, owner)
+    print(f"harvested {len(all_interior)} additional interior labels "
+          f"from switch cases")
+
+    emit_register_file(merged_addr_to_owner, REGISTER_OUTPUT)
     print(f"wrote {REGISTER_OUTPUT.relative_to(REPO_ROOT)} "
-          f"({len(addr_to_owner)} trampoline(s))")
+          f"({len(merged_addr_to_owner)} trampoline(s))")
     print(f"patched {patched} file(s); {len(by_owner) - patched} already up-to-date")
     return 0
 
