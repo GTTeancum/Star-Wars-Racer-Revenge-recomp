@@ -384,6 +384,15 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     std::cout << "[Bootstrap] Force-populated render-list root "
                                  "0x442F70 -> 0x44C800 (gsState)" << std::endl;
 
+                    // gsState +0xDC: sub_2596A0 jalrs to whatever this
+                    // contains (if non-zero). Wire it to sentinel
+                    // 0x00FFF500 (registered below) so we can observe
+                    // whether the per-frame chain actually reaches it.
+                    Ps2FastWrite32(rdram, 0x44C800u + 0xDCu, 0x00FFF500u);
+                    std::cout << "[Bootstrap] gsState+0xDC -> 0xFFF500 "
+                              << "(diagnostic sentinel for sub_2596A0 jalr)"
+                              << std::endl;
+
                     // sub_2F7DD8 returns mem[0x447B80 + ($a0 << 2)] — an
                     // indexed array of "subsystem ready" flags. sub_2F84F0
                     // (called via 0x239d2c by the boot subinit chain) spins
@@ -1157,6 +1166,22 @@ int main(int argc, char* argv[])
         Ps2FastWrite32(rdram, 0x44765Cu, 0u);
         SET_GPR_U32(ctx, 2, 0u);   // $v0 = 0 (success, 0 items)
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x00FFF500  gsState-callback diagnostic sentinel ---
+    // Wired into gsState+0xDC by bootstrap. sub_2596A0 jalrs through
+    // that slot every frame. If this sentinel ever logs, we know the
+    // per-frame chain reaches into the game's vtable dispatch.
+    runtime.registerFunction(0x00FFF500u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<uint64_t> s_calls{0};
+        const auto n = s_calls.fetch_add(1, std::memory_order_relaxed);
+        if (n < 4u || (n % 60u) == 1u) {
+            std::cerr << "[gsState+0xDC sentinel] n=" << n
+                      << " ra=0x" << std::hex << GPR_U32(ctx, 31)
+                      << std::dec << std::endl;
+        }
+        SET_GPR_S32(ctx, 2, 0);
+        ctx->pc = GPR_U32(ctx, 31);
     });
 
     // --- 0x00FFF400  zero-return sentinel ---
