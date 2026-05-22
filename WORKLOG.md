@@ -503,6 +503,35 @@ Either reveals new sub-blockers (the background thread parked at
 0x239d2c is one). The shortest path to actual game polygons is still
 many hours of RE work.
 
+## [2026-05-22 02:50] SESSION RESUME — overnight autonomous
+
+**Type:** session-marker
+**Cycle:** 3
+
+User instruction: "Work autonomously through the night. Reread mandate files
+after each cycle, continue without asking unless human testing required."
+Reread MANDATE/PRIORITIES/WORKLOG tail. Resuming.
+
+Cycle 3 target per PRIORITIES tiebreaker #1 (highest info value): unstick
+the background `gameLoopThread` parked at 0x239d2c. If it progresses past
+that spin, control flows to `sub_237640 → sub_13FDA0` which populates
+`mem[0x442F70]` (render-list root pointer), unlocking GIF traffic from the
+per-frame state func. This is the single highest-leverage change on the
+critical path to game polygons.
+
+Plan:
+1. Read all of sub_2F84F0 (the function 0x239d2c calls into) and identify
+   the spin condition or missing-handler path.
+2. Either fix the spin gate directly (preferred) or override sub_2F84F0
+   in main.cpp with a clean-return stub (fallback).
+3. Smoke-test. Confirm gameLoopThread advances past 0x239d2c via PC
+   sampler. Confirm 0x442F70 becomes non-zero.
+4. If polygons appear, retract previous milestone caveat and surface
+   the message per MANDATE §8. If not, identify the next blocker.
+
+Rollback: every change is in-source and reversible by git. No regen
+needed (touching main.cpp + submodule, not TOML).
+
 ## [2026-05-22 02:35] SESSION PAUSE
 
 **Type:** session-marker

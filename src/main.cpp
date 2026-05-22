@@ -358,6 +358,28 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     Ps2FastWrite32(rdram, 0x442FB8u, 1u);
                     std::cout << "[Bootstrap] Initialized DAT_442FB8=1 (func_257080 gate)" << std::endl;
 
+                    // sub_2F7DD8 returns mem[0x447B80 + ($a0 << 2)] — an
+                    // indexed array of "subsystem ready" flags. sub_2F84F0
+                    // (called via 0x239d2c by the boot subinit chain) spins
+                    // at label_2f8650 calling sub_2F7DD8($a0=0) until it
+                    // returns non-zero. Normally an IOP module init or
+                    // hardware ack sets mem[0x447B80] when subsystem 0
+                    // (probably IPU or VU) finishes initialising.
+                    //
+                    // We don't emulate that path, so the boot thread parks
+                    // here forever (PC sampler: pc=0x239d2c streak=39+).
+                    // Pre-populate slot 0 = 1 so the wait completes and
+                    // boot proceeds to sub_237640 → sub_13FDA0 which
+                    // populates the render-list root at mem[0x442F70].
+                    //
+                    // Populate slots 0..7 = 1 broadly — if other waits
+                    // exist for other subsystem IDs we'll catch them too.
+                    for (uint32_t i = 0; i < 8; ++i) {
+                        Ps2FastWrite32(rdram, 0x447B80u + i * 4u, 1u);
+                    }
+                    std::cout << "[Bootstrap] Pre-populated subsystem-ready "
+                              << "flags 0..7 at 0x447B80 (each = 1)" << std::endl;
+
                     // Force GS PMODE to enable CRT1.
                     //
                     // Trace `[gs:latch-fail]` shows DISPFB1=0x1400 and
@@ -946,6 +968,54 @@ int main(int argc, char* argv[])
     // VBLANK_START handler so the interrupt worker signals s_vblankCv on each
     // VBlank, waking gameFrameLoop. Not a real ELF function.
     runtime.registerFunction(0x00FFF100u, vblank_notify);
+
+    // --- Boot-path stub overrides ---
+    //
+    // The TOML's [stubs] list routes these to `ps2_stubs::TODO_NAMED`,
+    // which logs + throws "Unimplemented PS2 stub called". That kills the
+    // gameLoopThread (background main-loop at 0x302DF0) and triggers a
+    // catch+restart cycle that re-runs from 0x302DF0 indefinitely. After
+    // 8 throws TODO_NAMED stops throwing and returns -1, but the
+    // intervening cycle wastes 8x boot startup time and obscures real
+    // state. Override the specific stubs we know the boot path crosses
+    // with thin no-throw implementations.
+
+    // sub_2F7E20 — first stub the boot subinit chain hits at
+    // sub_2F84F0:label_2f8538. Real role unknown; in our context just
+    // returning -1 lets sub_2F84F0 proceed past it.
+    runtime.registerFunction(0x2F7E20, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, -1);
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    // sub_2F5FB0 — syscall 0x7A wrapper. Called from sub_2FDCB0 which
+    // spins at sub_239C40:label_239d88 waiting for `(syscall_0x7A_result
+    // & 0x40000) != 0`. On real PS2 this is a SIF/IOP status bit set by
+    // the IOP after module init. Force-return a value with bit 0x40000
+    // set so the gate passes and boot proceeds to func_311DF0 →
+    // sub_237640 → sub_13FDA0 (the writer of 0x442F70).
+    runtime.registerFunction(0x2F5FB0, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 0x40000);
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    // sub_311DF0 — stub called at sub_239C40:label_239d34 (jal between
+    // sub_2F84F0 and label_239d88's spin). With TODO_NAMED throwing,
+    // this terminates the boot thread before it can reach the sub_237640
+    // → sub_13FDA0 chain. Force-return 0 so boot proceeds.
+    runtime.registerFunction(0x311DF0, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 0);
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    // Boot-path stubs that throw and block forward progress. Each is the
+    // next-in-line throw observed via smoke logs as we override the
+    // previous one. Helper to keep the code short.
+    auto stubNoThrowZero = +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 0);
+        ctx->pc = GPR_U32(ctx, 31);
+    };
+    runtime.registerFunction(0x2F8690, stubNoThrowZero); // sub_002F8690 — RA=0x2fdd6c
 
     // --- 0x2F7150  SIF/IOP wait-loop bypass ---
     //
