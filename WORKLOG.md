@@ -826,6 +826,39 @@ observe what the real game does, or (b) implementing enough of the
 IOP RPC to let sub_2531E0 → sub_237640 → sub_13FDA0 complete its
 boot-time install of the syscall handlers.
 
+## [2026-05-22 14:00] Cycle 19-20: dispatch trace shows recovery cycles, not stable hang
+
+**Type:** result
+**Cycle:** 20
+
+A 30s smoke test (logs/smoketest_20260522_1330_30s.log) reveals more
+detail about the "parked at 0x239d2c" state:
+
+- 119 PC sampler snapshots over 30s all read pc=0x239d2c. m_debugPc
+  is a single shared atomic, so this doesn't necessarily mean one
+  thread is parked — it means "the most recent dispatch saw this PC".
+- `[dispatch:recover-pc]` logs fire repeatedly:
+  - `bad=0x2f57c0 ra=0x302e08 fallback=0x302e08` (main-loop thread)
+  - `bad=0x2f57c0 ra=0x2f6390 fallback=0x2f6390` (some other thread)
+- 0x2f57c0 is in the sub_2F5538 syscall-wrapper range; unregistered
+  function → dispatch's unimplemented-noop fires, ctx->pc=ra.
+- $ra=0x302e08 is inside the main loop at 0x302DF0 (offset 0x18). So
+  the gameLoopThread reaches at least 0x302e08 (not just 0x239d2c).
+
+So the boot is making SOME forward progress — it's not a fully static
+hang, it's a recovery-cycle through unregistered function addresses.
+Each iteration consumes time but produces no visible advance.
+
+Cycle 19: read sub_1336C0 + sub_30D920 + sub_30B4F0 looking for
+internal spins. None found. The "stuck" appears to be the recovery
+cycle, not a tight loop.
+
+Cycle 20: documented finding (this entry). No code change.
+
+The fact that smoke test passes 20/20 despite this recovery activity
+suggests the per-frame state-machine path is healthy and unaffected
+by what the boot thread is doing.
+
 ## [2026-05-22 13:15] MILESTONE — smoke test 20/20 PASS
 
 **Type:** milestone
