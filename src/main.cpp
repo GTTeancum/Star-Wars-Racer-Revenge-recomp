@@ -438,10 +438,15 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                         Ps2FastWrite32(rdram, 0x382B80u, modBase);
                         Ps2FastWrite32(rdram, modBase + 0x27Cu, modVTable);
                         Ps2FastWrite32(rdram, modVTable + 0x30u, 0x00FFF400u);
+                        // sub_237640 reads mem[modVTable+0x9C] and jalrs to it.
+                        // Point at the same zero-return sentinel so the call
+                        // is a no-op instead of jumping to mem[0x9C] junk.
+                        Ps2FastWrite32(rdram, modVTable + 0x9Cu, 0x00FFF400u);
                         std::cout << "[Bootstrap] Faked module-vtable chain "
                                      "[0x382B80] -> 0x" << std::hex << modBase
                                   << " [+0x27C] -> 0x" << modVTable
-                                  << " [+0x30] -> 0xFFF400 (zero-return sentinel)"
+                                  << " [+0x30] -> 0xFFF400, [+0x9C] -> 0xFFF400 "
+                                  << "(zero-return sentinel)"
                                   << std::dec << std::endl;
                     }
 
