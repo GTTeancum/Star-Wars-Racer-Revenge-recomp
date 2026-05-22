@@ -651,6 +651,88 @@ Architectural state at end of cycle 5:
 - Render buffers are empty — game code that fills them never runs
 - Boot-side main loop (0x302DF0) parked in sub_239C40 (IOP wait)
 
+## [2026-05-22 08:00] Cycle 6 framing — the architectural blocker
+
+**Type:** decision
+**Cycle:** 6
+
+*Question:* what's the actual remaining path to the polygons milestone
+("game's own polygons, not debug tests")?
+
+*Answer / analysis:*
+
+The chain mechanically works now:
+- state func 0x251B10 runs every VBlank
+- It calls func_257080 (vif1_buildPacket)
+- func_257080 reads $a0 buffer (0x435A04 or 0x43A808 selected via
+  mem[mem[0x442F70]+0x44])
+- Builds a VIF1 packet, sub_2596A0 submits it via DMA
+- VIF1_MARK toggles 0→1→0 each frame
+- The runtime processes pending VIF1 transfers (ps2_memory.cpp)
+- GS rasterises, latch presents
+
+What's missing: the BUFFERS at 0x435A04 / 0x43A808 are empty. These
+are vertex/command buffers that game logic fills. Game logic runs
+from 0x302DF0 (the main loop) → calls into the state machine →
+which would update entities → which would add primitives to the
+render list → which populates these buffers.
+
+0x302DF0 → sub_239C40 (boot_subinit) parks waiting for IOP module
+loading. We don't emulate IOP. So the boot never completes, the
+state machine never gets past its initial state, no game logic
+runs, no entities render.
+
+Two real paths forward (each days of work, not minutes):
+
+A. **Implement minimum-viable IOP RPC.** PCSX2 has a working IOP
+   emulator; we'd need to port enough of it to satisfy the SIF
+   RPC calls the boot makes. Specifically: the GFX module load
+   that sub_13FDA0 expects. This unblocks the entire boot
+   sequence and lets the game state machine run for real.
+
+B. **Bypass the boot.** Find the function that the game's title-
+   screen state would run after IOP modules finish loading.
+   Invoke it directly as our per-frame state, bypassing 0x302DF0
+   entirely. Requires Ghidra-level RE to find the right entry
+   point AND figure out what struct state it needs pre-populated.
+
+Both are out of scope for one overnight session. The infrastructure
+this session built is *real progress* and the right foundation for
+either path: silent smoke harness, 16/20 golden passing, full VIF1
+DMA cycle correct, all stub throws neutralized, all known interior
+labels trampolined.
+
+*What I'd do differently if I had another night:* attack path B.
+Path A (IOP emulation) is much bigger code volume; path B is mostly
+reading PS2-recompiled MIPS to identify entry points. Faster RE
+loop, higher chance of producing polygons before exhaustion.
+
+## [2026-05-22 08:05] SESSION END
+
+**Type:** session-marker
+**Cycle:** 6
+
+Genuine session end. 4 cycles of meaningful work (cycle 1 cold start
++ cycles 2-5 of system unblocking). Polygons milestone unreached but
+the path is now clearly mapped. WORKLOG is the handoff.
+
+Repo state: clean (everything committed), build green, smoke test
+runs to 10s wall clock without crashing, screenshot reproducible
+(though still synthetic). 16/20 golden checks still passing.
+
+Commits this session:
+- 5756e9d Cycle 1: silent smoke-test harness + extra_entry_points + Tier-1 boot
+- 2c7300b Cycle 2: polygons-on-screen [retracted — sprite, not polygons]
+- a039ed1 WORKLOG: retract false-positive milestone
+- ff584fa WORKLOG: cycle 2 pause
+- 8aef865 Cycle 2: per-frame state func runs every VBlank
+- 0ebb244 WORKLOG: VIF1_MARK never set
+- 0340b59 Cycle 3 in progress: target stub-throw overrides
+- e27cd57 Cycle 3 progress: bulk stub overrides + interior-label trampolines
+- ebff0e0 Cycle 3 close: bootstrap render-list root + module vtable + 0xFFF400
+- 6eac3fd Cycle 4: VIF1_MARK forced via sub_2596A0 wrapper
+- 518246f Cycle 5: 0x251DF0 dispatch fix — full VIF1 DMA chain cycles correctly
+
 ## [2026-05-22 07:40] SESSION PAUSE
 
 **Type:** session-marker
