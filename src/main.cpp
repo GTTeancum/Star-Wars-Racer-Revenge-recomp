@@ -366,6 +366,21 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     Ps2FastWrite32(rdram, 0x442FB8u, 1u);
                     std::cout << "[Bootstrap] Initialized DAT_442FB8=1 (func_257080 gate)" << std::endl;
 
+                    // Force-copy overlay_kernel_74 (the syscall dispatcher
+                    // overlay) from ELF VA 0x3849A0 to kseg0 0x80074000
+                    // (phys 0x74000). The kernel_overlay_loader at
+                    // sub_002FE8D0 normally does this via syscall 0x5A
+                    // memcpy during boot, but our boot is parked in
+                    // sub_239C40 and never reaches the loader. Overlays
+                    // 0x80075000 / 0x80076000 happen to get populated by
+                    // some other mechanism (TBD — likely runtime ELF
+                    // staging), but 0x80074000 stays zero. Smoke test
+                    // golden expects this populated.
+                    std::memcpy(rdram + 0x74000u, rdram + 0x3849A0u, 0x7A8u);
+                    std::cout << "[Bootstrap] Copied overlay_kernel_74 "
+                                 "(0x3849A0 -> 0x74000, 0x7A8 bytes)"
+                              << std::endl;
+
                     // Force-populate the render-list root pointer at
                     // 0x442F70. Normally sub_13FDA0 (deep in boot, never
                     // reached) writes a real ptr here from the IOP-loaded
