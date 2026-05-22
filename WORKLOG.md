@@ -826,6 +826,24 @@ observe what the real game does, or (b) implementing enough of the
 IOP RPC to let sub_2531E0 → sub_237640 → sub_13FDA0 complete its
 boot-time install of the syscall handlers.
 
+## [2026-05-22 14:35] Cycle 23: 60s smoke confirms stable healthy state
+
+**Type:** result
+**Cycle:** 23
+
+Verification cycle. Ran a 60-second smoke (longer than the 10s
+golden run) to look for any drift or late state changes:
+- 57 FrameDiag ticks in 60s (~56 fps; gameFrameLoop stable)
+- Final state identical to first FrameDiag: same dispatch table,
+  same gsState pointer, same 442F70/MARK values
+- Smoke test: still PASS
+- "PS2 Thread Exit" exception is thread id=2 (RPC handler thread per
+  CLAUDE.md 0x2F69D0) — normal, not an error
+
+State at cycle 23 close is the same as cycle 17 milestone: 20/20
+smoke PASS, log noise minimal, boot still parked in sub_239C40 but
+not actively making things worse over time. Stable plateau.
+
 ## [2026-05-22 14:15] Cycle 21-22: smoke log volume dropped
 
 **Type:** result
