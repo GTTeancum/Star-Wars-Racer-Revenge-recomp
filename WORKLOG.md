@@ -557,6 +557,70 @@ Stub-override and trampoline infrastructure is now solid:
 not met. The path forward requires either VIF1 DMA simulation work
 or render-list fabrication.
 
+## [2026-05-22 07:00] Cycle 4: VIF1_MARK forced, but no new geometry
+
+**Type:** result
+**Cycle:** 4
+
+Instrumented func_257080 (vif1_buildPacket) and sub_2596A0 with
+counters. Findings:
+
+- func_257080 IS called every frame (10 times in 10s).
+- sub_2596A0 IS called from inside func_257080 (10 times).
+- sub_2596A0 returns with ctx->pc=0x2596e0 (an interior label of
+  itself, not the canonical $ra=0x2571EC). This is a recompiler
+  artifact: the function's `jr $ra` at 0x259914 has a switch case
+  for 0x2596E0, and when $ra happens to equal that, the jr loops
+  back into the function instead of returning. By the time the
+  outer func_257080 sees ctx->pc != 0x2571EC, it returns early —
+  never executes its tail.
+
+Workaround installed:
+- Wrap sub_2596A0: force ctx->pc back to actual $ra register value
+  after the call (bypasses the interior-label switch loopback).
+- Also force-write VIF1_MARK=1 (mem[0x10003C30]=1) in the wrapper,
+  since the real function appears to do this via the DMA-submitted
+  VIF1 packet's UNPACK command, which our runtime's DMA path
+  doesn't actually execute.
+
+Result: VIF1_MARK now shows 0x1 in FrameDiag (was 0). The state
+func sees this, skips func_257080 next frame, calls sub_251DF0
+(vif1_frameSubmit) which should clear VIF1_MARK and submit DMA.
+
+But: screenshot unchanged (still the synthetic test_state_fn sprite).
+And FrameDiag shows VIF1_MARK=0x1 EVERY frame — sub_251DF0 isn't
+clearing it. Need to check if sub_251DF0 has a similar
+recompiler-artifact issue or if it's gated on something we haven't
+satisfied.
+
+No game-side geometry yet. The fundamental blocker remains: GAME
+logic (entity rendering, scene setup) runs from the main loop at
+0x302DF0, which is parked in sub_239C40's boot_subinit. Without
+IOP module loading, the boot path doesn't complete and game-state
+update functions never run.
+
+Three plausible next-cycle attacks:
+1. Trace sub_251DF0 with the same wrapper pattern. Find why it
+   doesn't clear VIF1_MARK. May need a similar pc-restore fix.
+2. Find a way to skip boot_subinit AND keep gameFrameLoop working
+   (last attempt at this dropped FrameDiag from 7 to 1).
+3. Hand-craft a call into the game's render-list-populate code
+   to inject sample geometry, bypassing the boot chain entirely.
+
+## [2026-05-22 07:05] SESSION PAUSE
+
+**Type:** session-marker
+**Cycle:** 4
+
+Stopping. Build green. ptr442F70 + VIF1_MARK both writable from
+bootstrap, but no game-side geometry yet — the chain past
+VIF1_MARK still produces empty packets because the game logic
+that fills the render list never runs.
+
+The cycle 4 instrumentation (counters in func_257080/sub_2596A0)
+is left in main.cpp. It logs lightly enough to not flood, and
+provides next-session telemetry for free.
+
 ## [2026-05-22 06:35] SESSION PAUSE
 
 **Type:** session-marker

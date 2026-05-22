@@ -1078,6 +1078,59 @@ int main(int argc, char* argv[])
     };
     runtime.registerFunction(0x2F8690, stubNoThrowZero); // sub_002F8690 — RA=0x2fdd6c
 
+    // Cycle 4 diagnostic: wrap func_257080 (vif1_buildPacket) with a
+    // counter so we can confirm per-frame chain reaches it. Plus
+    // wrap sub_2596A0 (the function CLAUDE.md implies handles the
+    // VIF1_MARK set via DMA submission).
+    extern void sub_00257080_0x257080(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_002596A0_0x2596a0(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x257080, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint64_t> s_calls{0};
+        const auto n = s_calls.fetch_add(1, std::memory_order_relaxed);
+        if (n < 4u || (n % 60u) == 0u) {
+            std::cerr << "[func_257080:wrap] n=" << n
+                      << " a0=0x" << std::hex << GPR_U32(ctx, 4)
+                      << " a1=0x" << GPR_U32(ctx, 5)
+                      << std::dec << std::endl;
+        }
+        ctx->pc = 0x257080u;
+        sub_00257080_0x257080(rdram, ctx, runtime);
+        if (n < 4u || (n % 60u) == 0u) {
+            std::cerr << "[func_257080:wrap] exit n=" << n
+                      << " v0=0x" << std::hex << GPR_U32(ctx, 2)
+                      << " pc=0x" << ctx->pc << std::dec << std::endl;
+        }
+    });
+    runtime.registerFunction(0x2596A0, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint64_t> s_calls{0};
+        const auto n = s_calls.fetch_add(1, std::memory_order_relaxed);
+        if (n < 4u || (n % 60u) == 0u) {
+            std::cerr << "[func_2596A0:wrap] n=" << n
+                      << " a0=0x" << std::hex << GPR_U32(ctx, 4)
+                      << " a1=0x" << GPR_U32(ctx, 5)
+                      << std::dec << std::endl;
+        }
+        ctx->pc = 0x2596A0u;
+        sub_002596A0_0x2596a0(rdram, ctx, runtime);
+        // sub_2596A0's recompiled body has a jr $ra path that lands on
+        // its own switch case (0x2596E0) when $ra happens to equal that
+        // — turning the return into a re-entry of label_2596e0. With
+        // our setup ctx->pc ends up at 0x2596e0 every call, which makes
+        // the caller (func_257080) see ctx->pc != post-jal return addr
+        // and bail early. Force ctx->pc back to the canonical return
+        // value so the caller continues normally.
+        const uint32_t ra = GPR_U32(ctx, 31);
+        if (ctx->pc != ra) {
+            ctx->pc = ra;
+        }
+        // Also set VIF1_MARK=1 directly. The real function's purpose
+        // appears to be DMA-submitting a VIF1 packet whose UNPACK
+        // command writes VIF1_MARK=1. We don't run VIF1 DMA correctly
+        // here so the side-effect is missing. Setting it manually
+        // satisfies the per-frame state machine's check at 0x251c60.
+        runtime->memory().writeIORegister(0x10003C30u, 1u);
+    });
+
     // Decision (cycle 3 / 2026-05-22 05:45): tried `runtime.registerFunction(
     // 0x239C40, returnZero)` to skip boot_subinit entirely. Result:
     // FrameDiag dropped from 7 to 1 (gameFrameLoop broken). Removed.
