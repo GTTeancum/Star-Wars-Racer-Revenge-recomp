@@ -70,8 +70,12 @@ static void test_state_fn(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime
     const uint8_t g = (uint8_t)(128u + (((phase + 85u) * 1u) & 0x7Fu));
     const uint8_t b = (uint8_t)(128u + (((phase + 170u) * 1u) & 0x7Fu));
 
-    // GIFtag: NLOOP=9, EOP=1, FLG=PACKED, NREG=1, REGS[0]=A+D (0xE)
-    write128(9ULL | (1ULL << 15) | (1ULL << 60), 0x0EULL);
+    // GIFtag: NLOOP=10, EOP=1, FLG=PACKED, NREG=1, REGS[0]=A+D (0xE)
+    // (8 setup registers + 1 PRIM + 1 RGBAQ + 3 XYZ2 = 12 total
+    //  reg-writes; but we share RGBAQ across vertices since flat-shaded
+    //  → 10 unique A+D pairs: FRAME, ZBUF, XYOFFSET, SCISSOR, TEST,
+    //  PRIM, RGBAQ, XYZ2, XYZ2, XYZ2.)
+    write128(10ULL | (1ULL << 15) | (1ULL << 60), 0x0EULL);
 
     // GS A+D registers: lo=DATA, hi=ADDR
     write128((uint64_t)(10u << 16),                                     0x4CULL); // FRAME_1: fbw=10
@@ -79,11 +83,15 @@ static void test_state_fn(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime
     write128(0ULL,                                                       0x18ULL); // XYOFFSET_1
     write128((639ULL << 16) | (447ULL << 48),                           0x40ULL); // SCISSOR_1
     write128(0ULL,                                                       0x47ULL); // TEST_1
-    write128(6ULL,                                                       0x00ULL); // PRIM: sprite
+    write128(3ULL,                                                       0x00ULL); // PRIM: triangle
     write128((uint64_t)r | ((uint64_t)g << 8) | ((uint64_t)b << 16) |
              (0x80ULL << 24) | (0x3F800000ULL << 32),                   0x01ULL); // RGBAQ
-    write128(1600ULL | (1600ULL << 16),                                 0x05ULL); // XYZ2 TL
-    write128(8640ULL | (5568ULL << 16),                                 0x05ULL); // XYZ2 BR
+    // Triangle vertices — three XYZ2 writes. Coordinates in 4.4 fixed-
+    // point screen space: divide visible value by 16. Place a tall
+    // triangle near the centre: apex top, base bottom.
+    write128(((uint64_t)(320u << 4) << 0)  | ((uint64_t)(100u << 4) << 16), 0x05ULL); // V0 apex (320,100)
+    write128(((uint64_t)(120u << 4) << 0)  | ((uint64_t)(400u << 4) << 16), 0x05ULL); // V1 bot-left (120,400)
+    write128(((uint64_t)(520u << 4) << 0)  | ((uint64_t)(400u << 4) << 16), 0x05ULL); // V2 bot-right (520,400)
 
     // Submit via GIF DMA (channel 2)
     const uint32_t qwc = off / 16u;
