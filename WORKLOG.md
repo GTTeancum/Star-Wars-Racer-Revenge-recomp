@@ -372,6 +372,71 @@ What's missing for the actual milestone:
   hasn't completed its first-call branch. So it's never gotten as far as
   submitting any geometry of its own.
 
+## [2026-05-21 23:50] 0x251B10 first call appears to never return
+
+**Type:** result
+**Cycle:** 2
+
+Reading the regenerated source at `src/generated/sub_00251A20_0x251a20.cpp`:
+
+- label_251b10 saves all FP registers, sets up $v0/$v1 scratch buffers,
+  cfc1 the FPU control reg, sq it to the scratch, then calls
+  `func_2F5E50` (sub_002F5E50 — syscall_noop, observed returning).
+- At 0x251be8: `lb $v0, -0x764C($gp)` → reads initFlag at 0x3D6324
+  (BSS, zero-init). If non-zero → goto label_251c04 (skip init).
+  If zero → fall through, set $v0=1, sw to DAT_442B70, sb to initFlag.
+- At 0x251c04 onwards: read DAT_442B70. If 0 → goto label_251c60
+  (skip render). If non-zero → call func_133660 (gs_dispatchHelper).
+
+FrameDiag in main.cpp prints `442B70=0 initFlag=0` at frame=1. After
+that, no further FrameDiag — neither frame=60 nor any later iteration
+appears in the log. The host runtime keeps spinning (latch-fail
+diagnostic continues to fire from the run loop), so the game thread is
+the one that's hung.
+
+Hypothesis: func_133660 → module_renderPrep → vblank_waitGated →
+vblank_wait spins on INTC_STAT bit 2, and either (a) the bit clear we
+expect isn't happening or (b) gameFrameLoop's own VBlank wait
+contends with the in-game one. The bootstrap calls
+`ps2_syscalls::EnsureVSyncWorkerRunning`, so raiseIntcStat(1<<2)
+should fire every 16.67ms — but tracing that empirically requires
+adding logging inside vblank_wait or the INTC raise path.
+
+Did NOT make further changes this cycle — bench is at a clean stopping
+point, runtime patches are committed, screenshot evidence captured for
+the synthetic-sprite path. Next session should:
+1. Add a debug counter or one-shot trace inside func_133660 / vblank_wait
+   to confirm whether the hang is on a spin or somewhere else.
+2. If it's the vblank spin, audit how EnsureVSyncWorkerRunning interacts
+   with the host frame loop's own VBlank simulation (they may double-
+   count or starve).
+3. Once 0x251B10 progresses past first call, FrameDiag will show
+   DAT_442B70=1 and we can examine downstream func_133660 behavior.
+
+## [2026-05-21 23:55] SESSION PAUSE
+
+**Type:** session-marker
+**Cycle:** 2
+
+Stopping point. Build is green. Smoke test runs to wall-clock timeout
+without crashing (16/20 golden checks pass — unchanged from cycle 1).
+Outstanding work catalogued in the entry above. No broken-build state
+to recover; next cycle can pick up from `git log` and the WORKLOG tail.
+
+Cycle 2 commits:
+- (submodule) 32b69c7 gs: relax host-presentation CRT validity to
+  hasDisplaySetup-only
+- (outer)    2c7300b Cycle 2: polygons on screen — GS host-
+                       presentation unblocked  *[misnamed milestone —
+                       see retraction below]*
+- (outer)    a039ed1 WORKLOG: retract false-positive milestone
+
+The "polygons on screen" wording in 2c7300b's title is wrong (it's a
+sprite from synthetic test_state_fn, not the game's own draw path)
+but the technical content of the commit — the GS latch relax and the
+PMODE-force diagnostic — is sound and should stay. The retraction
+commit clarifies the milestone status in WORKLOG.
+
 ## [2026-05-21 23:32] (kept for context) Synthetic sprite renders end-to-end
 
 **Type:** milestone
