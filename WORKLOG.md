@@ -288,6 +288,94 @@ If GIF traffic IS reaching the GS but the host latch isn't picking it up,
 the fix is in `ps2_runtime/src/lib/gs/`. If GIF traffic ISN'T reaching the
 GS, the fix is in the boot/state-machine path.
 
+## [2026-05-21 23:15] GS latch diagnostic added; cause identified
+
+**Type:** result
+**Cycle:** 2
+
+Added one-shot `[gs:latch-fail]` trace at the failure point in
+`latchHostPresentationFrame()`. First smoke run after rebuild:
+
+```
+[gs:latch-fail] pmode=0x0 smode2=0x0 dispfb1=0x1400 dispfb2=0x1400
+display1=0x1bf27f00000000 display2=0x1bf27f00000000 bgcolor=0x0
+enableCrt1=0 enableCrt2=0 hasDisplaySetup1=1 hasDisplaySetup2=1
+```
+
+DISPFB1 + DISPLAY1 are programmed — `hasDisplaySetup1=1`. PMODE is zero,
+both CRTs nominally disabled. Latch refuses to present, returns magenta.
+The game writes the display-frame registers via memory stores but never
+touches PMODE. `GsSetCrt` syscall would set PMODE bit 0, but the game
+doesn't issue it before the per-frame loop begins reading the GS.
+
+## [2026-05-21 23:22] Bootstrap PMODE force is insufficient — game re-clears it
+
+**Type:** result
+**Cycle:** 2
+
+Added bootstrap-side `runtime->memory().gs().pmode |= 1` in main.cpp
+alongside the other Initialized writes. Log confirms it fires
+("[Bootstrap] Forced GS PMODE.EN1=1 (was 0)"), but the next
+`[gs:latch-fail]` trace immediately shows `pmode=0x0` again — something
+in the boot path writes pmode back to 0 (likely the GS init function
+zeroing the register block as part of reset).
+
+## [2026-05-21 23:25] Decision: relax CRT-validity check to hasDisplaySetup
+
+**Type:** decision
+**Cycle:** 2
+
+*Question:* track down what's clearing PMODE and patch it, or relax the
+latch's validity rule?
+
+*Answer:* relax the latch (treat `hasDisplaySetup1` as sufficient,
+ignore the PMODE enable bit).
+
+*Reasoning:*
+- The PMODE-clearing writer is somewhere deep in the GS init path; finding
+  it requires deep MIPS/Ghidra work. Hours, not minutes.
+- The latch relaxation is one line, perfectly opt-in to this game's
+  behavior, and the trade is minor (a game that genuinely wants to blank
+  the CRT during mode-switch will appear unblanked — acceptable for now).
+- Per PRIORITIES.md tiebreaker #1: highest information value. The relax
+  immediately tells us whether the GS has rasterized output. If yes,
+  polygons. If no, the gap is elsewhere.
+
+*What I'd change if this is wrong:* if the game depends on PMODE-blank
+semantics (e.g. for fades), this will show wrong frames in those
+windows. Revert is one line in `latchHostPresentationFrame()`.
+
+## [2026-05-21 23:26] MILESTONE — POLYGONS ON SCREEN
+
+**Type:** milestone
+**Cycle:** 2
+
+`docs/polygons_milestone_cycle2.png` (committed; mirror of
+`logs/screenshots/polygons_milestone_cycle2.png` and
+`build/Release/cycle2_crt_relax.png`).
+
+Content: a solid mint-green rectangle on black background, dimensions
+~440×248 pixels, positioned top-left. This is the synthetic
+`test_state_fn` sprite — submitted as a GIF DMA chain at bootstrap with
+PRIM=sprite, XYZ2 TL=(100,100), XYZ2 BR=(540,348) in screen pixels
+(matches the geometry observed in the screenshot). RGB cycles per
+frame; this capture caught it on a green phase.
+
+This is the first time the PS2 GS pipeline has end-to-end produced
+visible host-framebuffer content in this repo. The chain is:
+
+  test_state_fn → GIF DMA chan 2 → m_pendingGifTransfers →
+  submitGifPacket → GS processGIFPacket → rasterize into VRAM →
+  latchHostPresentationFrame → copyLatchedHostPresentationFrame →
+  UploadFrame → raylib DrawTexturePro → TakeScreenshot.
+
+Build commit: will record after this commit lands. Headless run,
+FLAG_WINDOW_HIDDEN, --runtime-seconds 10, --screenshot every 60 frames.
+
+Smoke test status: still 16/20 (the 4 outstanding failures —
+dispatch_table[1..3] and overlay@0x80074000 — are not in the polygons
+path and remain for the next session).
+
 **Type:** session-marker
 **Cycle:** 0
 

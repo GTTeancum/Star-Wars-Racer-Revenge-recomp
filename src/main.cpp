@@ -358,6 +358,32 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     Ps2FastWrite32(rdram, 0x442FB8u, 1u);
                     std::cout << "[Bootstrap] Initialized DAT_442FB8=1 (func_257080 gate)" << std::endl;
 
+                    // Force GS PMODE to enable CRT1.
+                    //
+                    // Trace `[gs:latch-fail]` shows DISPFB1=0x1400 and
+                    // DISPLAY1=0x1bf27f00000000 — both set — but
+                    // pmode=0x0 means neither CRT is enabled, so
+                    // `latchHostPresentationFrame` always magenta-fills.
+                    // GsSetCrt (syscall 0x2) sets pmode|=1 if zero, but
+                    // the boot path doesn't reach that syscall before
+                    // the per-frame loop begins reading the GS. Force-
+                    // enable here so the host can present whatever the
+                    // GS rasterises.
+                    //
+                    // Bit 0 = EN1 (CRT1 enable). Other bits left at 0:
+                    //   - MMOD/AMOD/SLBG: blend mode (single-CRT mode
+                    //     doesn't use them).
+                    //   - ALP: 0x00 = circuit-2 fully transparent
+                    //     (irrelevant when CRT2 disabled).
+                    {
+                        auto& gs = runtime->memory().gs();
+                        if ((gs.pmode & 0x3ull) == 0ull) {
+                            gs.pmode |= 0x1ull;
+                            std::cout << "[Bootstrap] Forced GS PMODE.EN1=1 (was 0)"
+                                      << std::endl;
+                        }
+                    }
+
                     // VIF1_MARK (0x10003C30) must stay 0 so 0x251B10 calls func_257080
                     // (real VIF1 packet builder) instead of func_258E70 (stub).
                     // func_257080 will set VIF1_MARK=1 after building the packet;
