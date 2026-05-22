@@ -1122,6 +1122,13 @@ int main(int argc, char* argv[])
     };
     runtime.registerFunction(0x2F8690, stubNoThrowZero); // sub_002F8690 — RA=0x2fdd6c
 
+    // 0x2F57C0 — interior of stubbed sub_002F5538 (a multi-function
+    // syscall-wrapper range that the analyzer rolls into one function).
+    // Smoke logs show repeated `[dispatch:recover-pc] bad=0x2f57c0`
+    // events as the dispatcher recovers to caller $ra each time. Register
+    // as a noop so the recovery cycle short-circuits.
+    runtime.registerFunction(0x2F57C0, stubNoThrowZero);
+
     // sub_2596A0 wrapper. Two purposes:
     //   1. Restore ctx->pc to $ra after the call. The recompiled body
     //      has a jr-$ra path whose switch table happens to include
