@@ -1168,18 +1168,12 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
     });
 
-    // --- 0x00FFF500  gsState-callback diagnostic sentinel ---
+    // --- 0x00FFF500  gsState-callback sentinel ---
     // Wired into gsState+0xDC by bootstrap. sub_2596A0 jalrs through
-    // that slot every frame. If this sentinel ever logs, we know the
-    // per-frame chain reaches into the game's vtable dispatch.
+    // this slot every frame (~30 times per frame). On a real PS2 the
+    // game would install its render callback here. We don't have that,
+    // so this sentinel just returns 0.
     runtime.registerFunction(0x00FFF500u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        static std::atomic<uint64_t> s_calls{0};
-        const auto n = s_calls.fetch_add(1, std::memory_order_relaxed);
-        if (n < 4u || (n % 60u) == 1u) {
-            std::cerr << "[gsState+0xDC sentinel] n=" << n
-                      << " ra=0x" << std::hex << GPR_U32(ctx, 31)
-                      << std::dec << std::endl;
-        }
         SET_GPR_S32(ctx, 2, 0);
         ctx->pc = GPR_U32(ctx, 31);
     });
