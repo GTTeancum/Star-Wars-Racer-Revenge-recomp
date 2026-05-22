@@ -826,6 +826,75 @@ observe what the real game does, or (b) implementing enough of the
 IOP RPC to let sub_2531E0 → sub_237640 → sub_13FDA0 complete its
 boot-time install of the syscall handlers.
 
+## [2026-05-22 14:50] Cycle 24: handoff reference — all overrides & bootstrap patches
+
+**Type:** result
+**Cycle:** 24
+
+For the next session pickup. Complete list of runtime overrides and
+bootstrap-side memory patches accumulated this session.
+
+### main.cpp runtime overrides (`runtime.registerFunction(...)`)
+
+| Address | Behavior |
+|---|---|
+| 0x239D2C | (removed, harvested via inject script for label trampoline) |
+| 0x2596A0 | Wraps real function: restore ctx->pc to $ra; force VIF1_MARK=1 |
+| 0x2F57C0 | Noop return 0 (cuts recover-pc noise) |
+| 0x2F5FB0 | Return 0x40000 (syscall 0x7A wrapper; unblocks sub_2FDCB0 spin) |
+| 0x2F7150 | Clears mem[0x44765C], returns 0 (SIF RPC wait bypass) |
+| 0x2F7E20 | Returns -1 (boot-path stub) |
+| 0x2F8690 | Returns 0 (boot-path stub) |
+| 0x2FDCE8 | Returns 1 (bypasses sub_239C40:0x239d68 spin; setGameState path at 0x2FDDF8 unaffected — calls real body directly) |
+| 0x311DF0 | Returns 0 (boot-path stub) |
+| 0x1000AC | Trampoline for _start tail-jump (existed before this session) |
+| 0x2F69D0 | RPC handler thread entry (existed before this session) |
+| 0x2E9150 | Module main entry (existed before this session) |
+| 0x251B10 | GS init dispatch (existed before this session) |
+| 0x251DF0 | vif1_frameSubmit (existed before; now backed by patched switch case) |
+| 0x2FDDF8 | setGameState wrapper (existed before this session) |
+| 0x00FFF100 | vblank_notify (existed before this session) |
+| 0x00FFF300 | test_state_fn (modified cycle 8 to draw triangle) |
+| 0x00FFF400 | Zero-return sentinel for jalr no-op chains |
+| 0x00FFF500 | gsState+0xDC sentinel (returns 0) |
+
+### Bootstrap-side memory writes (Phase 4 of gameFrameLoop init)
+
+| Address | Value | Purpose |
+|---|---|---|
+| 0x382B80 | 0x44F000 | Fake module table base (breaks 0x23A124 jalr spin) |
+| 0x44F000+0x27C | 0x44F300 | Fake module vtable |
+| 0x44F300+0x30 | 0x00FFF400 | Vtable slot → zero-return sentinel |
+| 0x44F300+0x9C | 0x00FFF400 | Vtable slot → zero-return sentinel |
+| 0x442F70 | 0x44C800 | Render-list root → gsState (unblocks func_257080) |
+| 0x44C800+0xDC | 0x00FFF500 | gsState callback → diagnostic sentinel |
+| 0x447B80..0x447B9C | 1 each | Subsystem-ready flags (unblocks sub_2F7DD8 spin in sub_2F84F0) |
+| 0x442FB8 | 1 | func_257080 first-gate (legacy comment; not actually checked) |
+| 0x443DC8 | 1 | GS dispatch helper gate |
+| Phys 0x74000..0x747A8 | copy from 0x3849A0 | overlay_kernel_74 (smoke-golden expectation) |
+| gs.pmode | bit 0 set | Force CRT1 enable |
+
+### Submodule (ps2xRuntime) changes this session
+
+- INTC_STAT W1C semantics + VBlank-side raise via `raiseIntcStatBit`
+- GS host-presentation CRT-validity relaxed to `hasDisplaySetup`-only
+- Unimplemented-function default → silent noop + ctx->pc=ra
+- TODO_NAMED no-throw (returns -1 silently)
+- Post-frame hook for headless smoke test
+- Debug PC snapshot getters
+- Dispatcher: syscall 0x0D + game's dispatch-table mirror
+- Dispatcher: SIF range 0x79-0x82 wired to existing sceSif* stubs
+- Dispatcher: -0x68 as no-op
+- TODO_NAMED syscallId heuristic uses v1 (PS2 ABI) instead of v0
+
+### Tools added this session
+
+- `tools/gen_stub_overrides.py` — generates
+  `src/generated/stub_overrides_register.cpp` from TOML `skip = [...]`
+- `tools/inject_extra_entry_points.py` — patches generated .cpp files
+  with case+label entries for TOML `[[extra_entry_points]]`, and emits
+  trampoline registrations
+
 ## [2026-05-22 14:35] Cycle 23: 60s smoke confirms stable healthy state
 
 **Type:** result
