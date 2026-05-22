@@ -358,6 +358,24 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     Ps2FastWrite32(rdram, 0x442FB8u, 1u);
                     std::cout << "[Bootstrap] Initialized DAT_442FB8=1 (func_257080 gate)" << std::endl;
 
+                    // Force-populate the render-list root pointer at
+                    // 0x442F70. Normally sub_13FDA0 (deep in boot, never
+                    // reached) writes a real ptr here from the IOP-loaded
+                    // GFX module. Without it, func_257080 reads 0 →
+                    // mem[0]+0x44 = junk → buffer-select branch effectively
+                    // arbitrary; geometry submission never happens.
+                    //
+                    // Point to gsState (0x44c800) — a known-valid in-RAM
+                    // struct (we set this up earlier in Phase 4). gsState
+                    // +0x44 reads as zero (the struct was memset'd before
+                    // we wrote specific fields), which makes the buffer-
+                    // selector at sub_257080:0x2570ac branch one
+                    // particular way. Either branch ought to let
+                    // func_257080 reach its VIF1_MARK set.
+                    Ps2FastWrite32(rdram, 0x442F70u, 0x44C800u);
+                    std::cout << "[Bootstrap] Force-populated render-list root "
+                                 "0x442F70 -> 0x44C800 (gsState)" << std::endl;
+
                     // sub_2F7DD8 returns mem[0x447B80 + ($a0 << 2)] — an
                     // indexed array of "subsystem ready" flags. sub_2F84F0
                     // (called via 0x239d2c by the boot subinit chain) spins
@@ -379,6 +397,36 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     }
                     std::cout << "[Bootstrap] Pre-populated subsystem-ready "
                               << "flags 0..7 at 0x447B80 (each = 1)" << std::endl;
+
+                    // Fake module-table chain to break sub_239C40's jalr-spin
+                    // at 0x23a124 → 0x23a134 (`jalr $t9` then
+                    // `bnez $v0, label_23a124`). $t9 is derived from:
+                    //   $a0 = mem[0x382B80]          (module table base ptr)
+                    //   $t9 = mem[$a0 + 0x27C]       (sub-pointer / vtable)
+                    //   $t9 = mem[$t9 + 0x30]        (function pointer)
+                    //
+                    // Everything in this chain is BSS-zero in our boot, so
+                    // the dereferences read garbage from low memory and the
+                    // resulting $v0 stays 1 → infinite spin.
+                    //
+                    // Bootstrap-fake the chain to land on sentinel 0x00FFF400
+                    // (registered below as a `$v0 = 0; jr $ra` stub) so the
+                    // spin exits.
+                    {
+                        // Use 0x44F000+ so we don't clobber the module-
+                        // manager state block at 0x44E000 (allocated above
+                        // and populated with callback slots, see Phase 2).
+                        const uint32_t modBase    = 0x44F000u;
+                        const uint32_t modVTable  = 0x44F300u;
+                        Ps2FastWrite32(rdram, 0x382B80u, modBase);
+                        Ps2FastWrite32(rdram, modBase + 0x27Cu, modVTable);
+                        Ps2FastWrite32(rdram, modVTable + 0x30u, 0x00FFF400u);
+                        std::cout << "[Bootstrap] Faked module-vtable chain "
+                                     "[0x382B80] -> 0x" << std::hex << modBase
+                                  << " [+0x27C] -> 0x" << modVTable
+                                  << " [+0x30] -> 0xFFF400 (zero-return sentinel)"
+                                  << std::dec << std::endl;
+                    }
 
                     // Force GS PMODE to enable CRT1.
                     //
@@ -1030,6 +1078,13 @@ int main(int argc, char* argv[])
     };
     runtime.registerFunction(0x2F8690, stubNoThrowZero); // sub_002F8690 — RA=0x2fdd6c
 
+    // Decision (cycle 3 / 2026-05-22 05:45): tried `runtime.registerFunction(
+    // 0x239C40, returnZero)` to skip boot_subinit entirely. Result:
+    // FrameDiag dropped from 7 to 1 (gameFrameLoop broken). Removed.
+    // sub_239C40 does important setup gameFrameLoop depends on, even
+    // when its deeper boot path is gated by IOP-loaded modules we
+    // can't run.
+
     // sub_002FDCE8 (entry at 0x2FDCE8, NOT the 0x2FDDF8 setGameState
     // interior label). boot_subinit at sub_239C40:label_239d68 calls this
     // in a spin: while sub_002FDCE8($a0=$sp+0x260) returns 0, loop. The
@@ -1066,6 +1121,16 @@ int main(int argc, char* argv[])
         Ps2FastWrite32(rdram, 0x44765Cu, 0u);
         SET_GPR_U32(ctx, 2, 0u);   // $v0 = 0 (success, 0 items)
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x00FFF400  zero-return sentinel ---
+    // Sets $v0=0 then jr $ra. Used to break boot-side jalr-spins where
+    // the called function pointer would normally return 0 in $v0 to
+    // signal completion. See the bootstrap comment for the fake module-
+    // vtable chain at 0x382B80.
+    runtime.registerFunction(0x00FFF400u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 0);
+        ctx->pc = GPR_U32(ctx, 31);
     });
 
     // --- 0x00FFF300  test_state_fn (synthetic) ---

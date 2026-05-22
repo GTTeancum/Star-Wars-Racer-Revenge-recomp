@@ -503,6 +503,69 @@ Either reveals new sub-blockers (the background thread parked at
 0x239d2c is one). The shortest path to actual game polygons is still
 many hours of RE work.
 
+## [2026-05-22 06:30] Cycle 3 close — 442F70 forced, VIF1_MARK still 0
+
+**Type:** result
+**Cycle:** 3
+
+Final state after cycle 3:
+
+- 7 FrameDiag ticks per 10s (gameFrameLoop healthy across long runs;
+  60s runs show ~3360 frames).
+- Boot thread (gameLoopThread running 0x302DF0) genuinely stuck inside
+  sub_239C40 — verified by 60s sustained PC sampler showing 239
+  consecutive samples at pc=0x239d2c, no progress.
+- ptr442F70 now = 0x44C800 (bootstrap-forced to gsState), but
+  VIF1_MARK stays 0 every frame.
+
+The chain is:
+- state func 0x251B10 → label_251c60 (VIF1_MARK check)
+- VIF1_MARK == 0 → jal func_257080 (vif1_buildPacket)
+- func_257080 builds packet, calls sub_2596A0
+- ...VIF1_MARK should become 1 once the packet's VIF write executes...
+- But it doesn't, so func_257080 either isn't being called, or sub_2596A0
+  doesn't actually submit the DMA, or the runtime's VIF1 DMA path
+  doesn't actually execute the queued packet's writes.
+
+Three plausible next-cycle attack angles, in priority order:
+
+1. **Verify func_257080 is actually being called every frame.** Add a
+   counter inside its override or via a registered trampoline. If yes,
+   the issue is downstream (VIF1 DMA simulation). If no, the bne at
+   label_251c60 is taking the wrong branch (state machine issue).
+
+2. **Trace VIF1 DMA submission.** ps2_memory.cpp has the VIF1 path
+   (m_pendingVif1Transfers + processPendingTransfers + processVIF1Data).
+   Confirm whether queued packets get processed and whether the
+   VIF1_MARK write reaches the IO register.
+
+3. **Skip the boot thread entirely.** Override 0x302DF0 (game's main loop
+   entry) so it doesn't run sub_239C40 at all. If that lets the
+   per-frame chain produce real packets, the boot was actually a red
+   herring — the per-frame chain produces nothing because it has no
+   render list, and bootstrap-faking the render list is the real fix.
+
+Stub-override and trampoline infrastructure is now solid:
+- 428 TOML-skipped functions overridden with return-0
+- 36203 interior labels harvested into trampolines
+- 5 targeted boot-path stub overrides
+- Bootstrap-faked module-vtable chain at 0x382B80
+- Bootstrap-populated mem[0x447B80..] subsystem-ready flags
+- TODO_NAMED no longer throws (returns -1)
+
+**Commit checkpoint:** see git log. The polygons milestone is still
+not met. The path forward requires either VIF1 DMA simulation work
+or render-list fabrication.
+
+## [2026-05-22 06:35] SESSION PAUSE
+
+**Type:** session-marker
+**Cycle:** 3
+
+Stopping point. Build green. Smoke test still produces only the synthetic
+test_state_fn green sprite. No game-side geometry yet. Next cycle's
+priorities documented in the entry above.
+
 ## [2026-05-22 02:50] SESSION RESUME — overnight autonomous
 
 **Type:** session-marker
