@@ -994,6 +994,13 @@ int main(int argc, char* argv[])
         //
         // When $a0 is already a plausible code address (>= 0x100000), let it
         // through unchanged — that's the game's own state-transition logic.
+        //
+        // CYCLE 11 NOTE: we keep 0x251B10 here so that gameFrameLoop's
+        // VIF1 pipeline (the real func_257080 → sub_2596A0 → sub_251DF0
+        // chain) exercises every frame, even though the buffers are empty.
+        // Switching to test_state_fn (0xFFF300) would make per-frame
+        // triangles visible synthetically but defeat the infrastructure
+        // verification of the full game-side VIF1 chain.
         const uint32_t stateFunc = (originalA0 < 0x100000u) ? 0x00251B10u : originalA0;
         if (originalA0 < 0x100000u) {
             SET_GPR_U32(ctx, 4, stateFunc);
