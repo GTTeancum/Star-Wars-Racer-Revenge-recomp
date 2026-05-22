@@ -826,6 +826,39 @@ observe what the real game does, or (b) implementing enough of the
 IOP RPC to let sub_2531E0 → sub_237640 → sub_13FDA0 complete its
 boot-time install of the syscall handlers.
 
+## [2026-05-22 15:05] Cycle 25: stable plateau, no actionable improvement found
+
+**Type:** result
+**Cycle:** 25
+
+Examined remaining candidate improvements; none productively
+actionable in chat scope:
+
+- sceSifSendCmd already returns 1 (success); no incorrect return
+  values blocking the boot.
+- samePcCount yield logic only fires when dispatchLoop iterates with
+  same pc — but we're stuck *inside* a function call (dispatcher
+  not iterating), so this doesn't help diagnose.
+- A 60s smoke produces the same state as a 10s smoke — no latent
+  timer that would advance the boot if we just wait.
+
+The boot is genuinely stuck inside sub_2F84F0 or its callees (the
+call from sub_239C40:0x239d2c). PC sampler is incapable of seeing
+where inside, because dispatch doesn't update m_debugPc during a
+single function's C++ body.
+
+To make further progress we'd need either:
+- Add instrumented checkpoints at every internal label of sub_2F84F0
+  (and recursively into its callees). Invasive, would touch many
+  generated files.
+- Modify dispatchLoop to track sub-function entries (would need API
+  changes in the recompiler's emitted code).
+- Run PCSX2 dynamically with logging to see what the real boot does
+  past this point.
+
+All three are outside what one chat session can deliver. Smoke
+remains 20/20 PASS as a stable green baseline.
+
 ## [2026-05-22 14:50] Cycle 24: handoff reference — all overrides & bootstrap patches
 
 **Type:** result
