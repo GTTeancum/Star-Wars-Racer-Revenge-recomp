@@ -3381,6 +3381,8 @@ address = "0x2F69D0"  # Thread 2 RPC handler entry inside sub_002F68F8
 address = "0x2E921C"  # jalr return address in callback dispatch loop at entry_2e91f0
 [[extra_entry_points]]
 address = "0x251B10"  # GS init render function — interior label inside sub_00251A20
+[[extra_entry_points]]
+address = "0x251DF0"  # vif1_frameSubmit — interior label inside sub_00251A20
 
 # Interior syscall handlers inside kseg0 overlays. These addresses are
 # installed via SetSyscall but not reachable via direct jal, so the T6

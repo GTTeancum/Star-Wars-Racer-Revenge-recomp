@@ -607,6 +607,86 @@ Three plausible next-cycle attacks:
 3. Hand-craft a call into the game's render-list-populate code
    to inject sample geometry, bypassing the boot chain entirely.
 
+## [2026-05-22 07:35] Cycle 5: 0x251DF0 dispatch fixed — DMA chain works
+
+**Type:** result
+**Cycle:** 5
+
+Discovery: `runtime.registerFunction(0x251DF0, ...)` in main.cpp was a
+broken trampoline. sub_00251A20's switch had no `case 0x251df0u`, so
+when main.cpp's per-frame call set ctx->pc=0x251DF0 and called
+`sub_00251A20_0x251a20`, the switch fell through default and started
+from 0x251A20 (the function start). vif1_frameSubmit was never actually
+executing.
+
+Fix: added `0x251DF0` to TOML `[[extra_entry_points]]`. Re-ran
+`tools/inject_extra_entry_points.py` — it patched
+`sub_00251A20_0x251a20.cpp` to include the case + label_251df0.
+
+Result (logs/smoketest_20260522_0735.log):
+- FrameDiag healthy (7 ticks/10s)
+- VIF1_MARK trajectory now 0x0 every FrameDiag snapshot (was stuck 0x1)
+- func_257080 called 20 times in 10s (≈2/frame: state func sees
+  VIF1_MARK=0 → calls func_257080 → my sub_2596A0 wrapper sets MARK=1
+  → vif1_frameSubmit at 0x251DF0 sees MARK=1, submits DMA, clears
+  MARK=0 → next frame repeats)
+
+Mechanically the VIF1 DMA cycle is now correct. Screenshot unchanged
+(still the bootstrap test_state_fn green sprite) because:
+- func_257080 builds the packet from gsState buffer at 0x44c800
+- gsState was memset'd to zero with a few Phase-4 fields set
+- The "render list" within gsState (offset 0x44 = 0) is empty
+- VIF1 DMA submits empty packets; no new geometry reaches the GS
+
+Tools fix (cycle 5 cleanup): the interior-label harvest in
+`inject_extra_entry_points.py` generated a 7.8MB
+`extra_entry_points_register.cpp` that the top-level CMake EXCLUDED
+as a "huge function" (>2MB threshold). The exclusion broke the link
+silently. Reverted that block; only explicit TOML
+`[[extra_entry_points]]` get trampolines now.
+
+Architectural state at end of cycle 5:
+- Boot reaches per-frame loop and stays there cleanly
+- VIF1 DMA chain is mechanically correct end-to-end
+- Render buffers are empty — game code that fills them never runs
+- Boot-side main loop (0x302DF0) parked in sub_239C40 (IOP wait)
+
+## [2026-05-22 07:40] SESSION PAUSE
+
+**Type:** session-marker
+**Cycle:** 5
+
+Stopping for the night. The polygons milestone is NOT met. Substantial
+infrastructure progress across 4 work cycles tonight:
+
+| Cycle | Headline |
+|---|---|
+| 1 | Toolchain, src/generated/, headless smoke harness, 16/20 golden |
+| 2 | INTC_STAT + GS latch relax: state func 0x251B10 runs every VBlank |
+| 3 | Bulk stub overrides, interior-label trampolines, no-throw TODO_NAMED |
+| 4 | sub_2596A0 wrapper: VIF1_MARK writable from per-frame chain |
+| 5 | 0x251DF0 dispatch fix: full VIF1 DMA chain cycles correctly |
+
+What's NOT working: game-side render-list population. Game logic that
+fills the per-frame buffers runs from 0x302DF0's main loop, which is
+parked in sub_239C40 awaiting IOP module loading we don't emulate.
+
+Next-cycle attack angles (in priority order, from cycle 4/5 WORKLOG
+entries):
+1. **Hand-inject sample geometry into the render list** at bootstrap
+   to verify the chain produces visible output. If yes, the only
+   remaining gap is real game logic.
+2. **Find a known render-list-add entry point** (sub_30B4F0 is
+   renderList_manager; trace its add-primitive callers) and invoke
+   it from a synthetic frame hook.
+3. **Skip 0x302DF0 entirely** and replace it with a synthetic main
+   loop that runs just the parts we need. Last attempt at this
+   broke gameFrameLoop; need to identify the specific setup
+   0x302DF0 does that the per-frame chain relies on.
+
+Files left in a clean / committed state. Next Claude session reads
+this entry and picks up.
+
 ## [2026-05-22 07:05] SESSION PAUSE
 
 **Type:** session-marker

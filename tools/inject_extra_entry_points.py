@@ -295,25 +295,15 @@ def main() -> int:
             patched += 1
             print(f"  patched {path.name}: {[hex(a) for a in addr_list]}")
 
-    # Also harvest every interior label across all generated .cpp files
-    # and emit trampolines for them. This catches the common pattern of
-    # `jal func_X` setting $ra to an interior label of func_X, then the
-    # dispatcher failing to resolve that interior address when func_X
-    # returns via `jr $ra`. Without these trampolines, the unimplemented-
-    # function default kicks in and loops on ctx->pc=ra forever (verified
-    # via PC sampler — see WORKLOG cycle 3).
-    all_interior = harvest_all_interior_labels(GENERATED_DIR)
-    merged_addr_to_owner = dict(addr_to_owner)
-    for addr, owner in all_interior.items():
-        # Don't clobber explicit TOML extra_entry_points (their owner is
-        # already settled).
-        merged_addr_to_owner.setdefault(addr, owner)
-    print(f"harvested {len(all_interior)} additional interior labels "
-          f"from switch cases")
-
-    emit_register_file(merged_addr_to_owner, REGISTER_OUTPUT)
+    # NOTE (cycle 5): the broader harvest of every interior switch-case
+    # label produced a 7.8MB .cpp that the top-level CMakeLists treats
+    # as a "huge function" and excludes from the MSVC build, breaking
+    # the link. Until we either split the file or relax the size guard,
+    # only emit trampolines for explicitly-listed TOML extra entry
+    # points.
+    emit_register_file(addr_to_owner, REGISTER_OUTPUT)
     print(f"wrote {REGISTER_OUTPUT.relative_to(REPO_ROOT)} "
-          f"({len(merged_addr_to_owner)} trampoline(s))")
+          f"({len(addr_to_owner)} trampoline(s))")
     print(f"patched {patched} file(s); {len(by_owner) - patched} already up-to-date")
     return 0
 
