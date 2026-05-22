@@ -413,6 +413,59 @@ the synthetic-sprite path. Next session should:
 3. Once 0x251B10 progresses past first call, FrameDiag will show
    DAT_442B70=1 and we can examine downstream func_133660 behavior.
 
+## [2026-05-22 02:15] Cycle 2 resume — INTC_STAT + 2F7150 bypass
+
+**Type:** result
+**Cycle:** 2
+
+After Steve's correction on the false-positive milestone, resumed work.
+Three fixes landed:
+
+1. **INTC_STAT W1C semantics + worker raise (submodule).**
+   `writeIORegister(0x1000F000)` now applies write-1-to-clear (matches real
+   PS2 hardware), and `interruptWorkerMain` calls `raiseIntcStatBit(2)`
+   each VBlank so the bit becomes visible to the game's spin in
+   `sub_2F6030`. New method `PS2Memory::raiseIntcStatBit(uint32_t)`.
+2. **Debug PC sampler in main.cpp.** 4 Hz dump of
+   `runtime.debugPcSnapshot()` so a hang shows up as a constant PC
+   value with rising streak count. Surfaced the next blocker
+   immediately.
+3. **sub_2F7150 SIF wait-loop bypass (main.cpp override).** Sampler
+   showed `pc=0x2f7258 ra=0x2f7264 streak=24+` — game thread stuck in
+   the spin at 0x2f7258 calling `sub_2F6DD0`→syscall 0x7C (a SIF/IOP
+   RPC wait). Real PS2 IOP would clear `mem[0x44765C]`, ending the
+   spin; we don't emulate IOP. Override clears the flag and returns
+   `$v0=0` (zero items processed).
+
+State after fixes:
+```
+[FrameDiag] frame=1   state=0x251b10 ... 442B70=0x0 initFlag=0
+[FrameDiag] frame=61  state=0x251b10 ... 442B70=0x1 initFlag=1
+[FrameDiag] frame=121 ...
+[FrameDiag] frame=361 ...
+```
+Per-frame state func is now running every VBlank without hanging. The
+`gameLoopThread` (background main loop at 0x302DF0) is parked at
+`pc=0x239d2c` — separate static spin, not blocking the per-frame
+chain. Smoke check still 16/20.
+
+Still no real geometry: `VIF1_MARK=0` and `ptr442F70=0` every frame.
+`func_257080` (VIF1 packet builder) has a gate `READ32(READ32(0x442F70)+0x44)`;
+0x442F70 is initialised to 0 by 4 of 5 generated writers and the one
+real writer (sub_0013FDA0) never runs at boot. The game evidently
+expects an IOP-loaded GFX module to populate the render-list root via
+that pointer.
+
+Next moves (in priority order):
+1. Trace what writes 0x442F70 in a healthy run; if it's a one-shot at
+   GS init, find the call path and either reach it or stub-write a
+   plausible struct ptr at bootstrap.
+2. Audit the 0x239d2c parking site of the main-loop background thread —
+   may be another wait that just needs a similar bypass.
+3. Hook into the VIF1 packet build / GS DMA submission and force a
+   render-list bootstrap from the C++ side if the IOP module path is
+   genuinely unreachable.
+
 ## [2026-05-21 23:55] SESSION PAUSE
 
 **Type:** session-marker

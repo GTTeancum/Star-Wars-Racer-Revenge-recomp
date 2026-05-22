@@ -723,6 +723,38 @@ int main(int argc, char* argv[])
         });
     }
 
+    // PC-sampler watchdog: 4 Hz dump of the dispatcher's most-recent PC so
+    // we can see where the game thread is sitting between FrameDiag prints.
+    // gameFrameLoop only logs every 60 in-game frames; if the game thread
+    // hangs inside a state-function spin, FrameDiag stops advancing and
+    // we'd otherwise have no visibility. Disabled by default; enable via
+    // --pc-sampler.
+    if (true)
+    {
+        std::thread([&runtime]() {
+            uint32_t lastPc = 0u;
+            uint32_t streak = 0u;
+            while (!runtime.isStopRequested())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                const uint32_t pc = runtime.debugPcSnapshot();
+                const uint32_t ra = runtime.debugRaSnapshot();
+                const uint32_t sp = runtime.debugSpSnapshot();
+                if (pc == lastPc) {
+                    ++streak;
+                } else {
+                    streak = 0u;
+                    lastPc = pc;
+                }
+                std::cout << "[PCSample] pc=0x" << std::hex << pc
+                          << " ra=0x" << ra
+                          << " sp=0x" << sp
+                          << std::dec << " streak=" << streak
+                          << std::endl;
+            }
+        }).detach();
+    }
+
     // Wall-clock watchdog: runs in a detached thread, calls requestStop().
     if (cli.runtimeSeconds > 0)
     {
@@ -914,6 +946,28 @@ int main(int argc, char* argv[])
     // VBLANK_START handler so the interrupt worker signals s_vblankCv on each
     // VBlank, waking gameFrameLoop. Not a real ELF function.
     runtime.registerFunction(0x00FFF100u, vblank_notify);
+
+    // --- 0x2F7150  SIF/IOP wait-loop bypass ---
+    //
+    // sub_2F7150 is a SIF-style RPC dispatcher: it marks an in-progress flag
+    // at mem[0x44765C] = 1, sends a request via func_2F6DA0, then enters a
+    // spin loop at 0x2f7258 calling sub_2F6DD0 (syscall 0x7C) until the
+    // flag clears. On real PS2 hardware the IOP side processes the request
+    // and writes 0 to 0x44765C, exiting the spin.
+    //
+    // We don't emulate the IOP, so the flag never clears and the game
+    // thread hangs forever on the first call to 0x251B10. Override the
+    // function with a clean "no work done" return: clear the in-progress
+    // flag immediately and set $v0=0 (zero items processed).
+    //
+    // Verified via PC sampler: pc=0x2f7258 ra=0x2f7264 streak forever
+    // before this override.
+    runtime.registerFunction(0x2F7150, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        // Clear the in-progress flag so the next caller can re-enter cleanly.
+        Ps2FastWrite32(rdram, 0x44765Cu, 0u);
+        SET_GPR_U32(ctx, 2, 0u);   // $v0 = 0 (success, 0 items)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
 
     // --- 0x00FFF300  test_state_fn (synthetic) ---
     // Synthetic game state registered at a sentinel VA outside ELF space.
