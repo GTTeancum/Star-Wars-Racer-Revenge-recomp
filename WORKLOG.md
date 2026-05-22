@@ -826,6 +826,44 @@ observe what the real game does, or (b) implementing enough of the
 IOP RPC to let sub_2531E0 → sub_237640 → sub_13FDA0 complete its
 boot-time install of the syscall handlers.
 
+## [2026-05-22 13:15] MILESTONE — smoke test 20/20 PASS
+
+**Type:** milestone
+**Cycle:** 17
+
+`python tools/smoke_test.py --runtime 10` reports `[smoke] PASS`.
+
+Before-state at session start: 0/20 passing. End-of-cycle-1: 16/20.
+End-of-cycle-17: 20/20.
+
+The remaining 4 failures from cycle 1 (dispatch_table[1..3] missing,
+overlay@0x80074000 zero) are now all resolved:
+
+- **dispatch_table[1..3] = 0x2fe300**: fixed by adding syscall 0x0D
+  case to the dispatcher (Racer Revenge's custom SetSyscall via
+  syscall 0x0D was falling to TODO). Case wires to standard
+  SetSyscall + mirrors the handler to the game's table at
+  0x384678+id*4 (not just the BIOS table at 0x11F80).
+- **overlay@0x80074000**: bootstrap-side memcpy from ELF VA 0x3849A0
+  to phys 0x74000, mirroring what kernel_overlay_loader would do.
+
+Also cleaned up syscall TODO noise from 831 hits/run to 0:
+- TODO_NAMED's id heuristic was `(v0 != 0) ? v0 : v1` — wrong, picked
+  junk v0 stack-ptr values over the real PS2-ABI $v1. Fixed to use
+  v1.
+- Wired dispatcher cases for SIF RPC range (0x79-0x82) and -0x68
+  (the well-documented no-op syscall).
+
+This is **infrastructure health**, not the polygons milestone.
+Smoke test green means our boot reaches the same state the golden
+snapshot was recorded against, but ptr442F70 + VIF1_MARK semantics
+remain forced-by-bootstrap, not naturally driven by game logic.
+The next session can trust smoke as a green baseline before
+iterating.
+
+PC sampler still shows the boot thread parked at 0x239d2c — same
+position as cycle 5+. No qualitative advance there.
+
 ## [2026-05-22 11:55] Genuine session end (4th)
 
 **Type:** session-marker
