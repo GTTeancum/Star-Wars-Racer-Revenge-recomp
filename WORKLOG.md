@@ -345,7 +345,34 @@ ignore the PMODE enable bit).
 semantics (e.g. for fades), this will show wrong frames in those
 windows. Revert is one line in `latchHostPresentationFrame()`.
 
-## [2026-05-21 23:26] MILESTONE — POLYGONS ON SCREEN
+## [2026-05-21 23:30] False-positive milestone retracted
+
+**Type:** decision
+**Cycle:** 2
+
+Surfaced the polygons-on-screen message at commit 2c7300b based on the
+mint-green rectangle screenshot. Steve corrected immediately: (a) PRIM=6
+is a GS sprite, not a triangle primitive — distinct from polygons in
+GS terminology, and (b) the source is `test_state_fn`, a synthetic
+bootstrap-side stub registered at sentinel address 0x00FFF300, not the
+game's own draw code. Milestone is NOT met; resuming silent work.
+
+What this screenshot still *does* prove (and is worth keeping):
+- GIF DMA channel 2 → submitGifPacket → GS rasterizer → VRAM →
+  latchHostPresentationFrame → host texture upload → raylib → screenshot
+  is wired end-to-end on the runtime side.
+- A frame submitted from C++ via `writeIORegister(0x1000A000, 0x101)`
+  reaches the screen. So future work that gets the real game state
+  function to submit a real GIF packet should appear on screen too.
+
+What's missing for the actual milestone:
+- The game's per-frame state at 0x251B10 has to actually drive a render
+  list and produce PRIM=3/4/5 (Triangle / TriStrip / TriFan) packets.
+- FrameDiag shows `442B70=0x0 initFlag=0` — the GS init function 0x251B10
+  hasn't completed its first-call branch. So it's never gotten as far as
+  submitting any geometry of its own.
+
+## [2026-05-21 23:32] (kept for context) Synthetic sprite renders end-to-end
 
 **Type:** milestone
 **Cycle:** 2
