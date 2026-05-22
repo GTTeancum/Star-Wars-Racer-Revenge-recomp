@@ -74,25 +74,55 @@ def parse_diag(output: str) -> dict:
     return parsed
 
 
-def run_exe(exe: Path, runtime_s: int, elf: Path) -> tuple[str, int]:
-    """Run the exe for `runtime_s` seconds, kill, return (output, rc).
+def run_exe(exe: Path, runtime_s: int, elf: Path,
+            screenshot: Path | None = None,
+            frames: int | None = None) -> tuple[str, int]:
+    """Run the exe headlessly for `runtime_s` seconds (wall clock), kill,
+    return (output, rc).
 
-    Pass the ELF path explicitly so we don't depend on CMake having copied
-    it next to the exe (which can go stale across regens)."""
+    MANDATE §5: the runtime is always launched with --headless so the host
+    window is FLAG_WINDOW_HIDDEN and cannot steal focus. The runtime is also
+    bounded by --runtime-seconds; the subprocess timeout is a backstop.
+
+    On Windows we additionally pass CREATE_NO_WINDOW so the spawned process
+    does not get a console window even when raylib's FLAG_WINDOW_HIDDEN is
+    ineffective (e.g. console subsystem launches)."""
     if not exe.exists():
         sys.exit(f"exe not found: {exe}")
     if not elf.exists():
         sys.exit(f"elf not found: {elf}")
+
+    cmd = [
+        str(exe.resolve()),
+        str(elf.resolve()),
+        "--headless",
+        "--runtime-seconds", str(runtime_s),
+    ]
+    if screenshot is not None:
+        cmd += ["--screenshot", str(Path(screenshot).resolve())]
+    if frames is not None:
+        cmd += ["--frames", str(frames)]
+
+    creationflags = 0
+    if os.name == "nt":
+        # CREATE_NO_WINDOW = 0x08000000
+        creationflags = 0x08000000
+
     try:
         proc = subprocess.run(
-            [str(exe.resolve()), str(elf.resolve())],
+            cmd,
             cwd=str(exe.parent),
             capture_output=True,
             text=True,
-            timeout=runtime_s,
+            # +5s grace beyond the runtime's own --runtime-seconds bound so
+            # the runtime has time to do its shutdown handshake. The runtime
+            # is responsible for stopping itself; this is just a backstop.
+            timeout=runtime_s + 5,
+            creationflags=creationflags,
         )
         return proc.stdout + proc.stderr, proc.returncode
     except subprocess.TimeoutExpired as e:
+        # The runtime didn't honour --runtime-seconds. Treat as a hang.
         return (e.stdout or "") + (e.stderr or ""), 124
 
 
@@ -147,10 +177,16 @@ def main() -> int:
                     help="Write the current observed state to the golden file instead of checking")
     ap.add_argument("--log", default=None,
                     help="Optional file path to dump raw exe output for debugging")
+    ap.add_argument("--screenshot", default=None,
+                    help="Optional path to write a host-window screenshot")
+    ap.add_argument("--frames", type=int, default=None,
+                    help="Optional host-frame limit (passed to the exe)")
     args = ap.parse_args()
 
-    print(f"[smoke] Running {args.exe} for {args.runtime}s...")
-    output, rc = run_exe(Path(args.exe), args.runtime, Path(args.elf))
+    print(f"[smoke] Running {args.exe} headlessly for {args.runtime}s...")
+    output, rc = run_exe(Path(args.exe), args.runtime, Path(args.elf),
+                         screenshot=Path(args.screenshot) if args.screenshot else None,
+                         frames=args.frames)
     print(f"[smoke] exit code={rc} output_bytes={len(output)}")
     if args.log:
         Path(args.log).write_text(output, encoding="utf-8", errors="replace")

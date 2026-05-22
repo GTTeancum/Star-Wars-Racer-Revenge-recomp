@@ -5,6 +5,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "register_functions.h"
+#include "raylib.h"
 
 #ifdef _DEBUG
 #include "ps2_log.h"
@@ -12,6 +13,7 @@
 
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <filesystem>
 #include <thread>
 #include <chrono>
@@ -587,17 +589,51 @@ void entry_point_sentinel(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime
 }
 
 // ---------------------------------------------------------------------------
+// Headless smoke-test options (MANDATE §5: never steal user focus).
+//   --headless              Hide the host window (FLAG_WINDOW_HIDDEN).
+//   --frames N              Stop after N host frames (raylib BeginDrawing
+//                           cycles, not VBlank ticks).
+//   --screenshot PATH       Take a host-window screenshot just before stop.
+//   --runtime-seconds N     Wall-clock watchdog; calls requestStop() after N.
+// Positional arg is still the optional ELF path.
+// ---------------------------------------------------------------------------
+struct CliArgs
+{
+    std::string elfPath;
+    bool        headless         = false;
+    uint64_t    framesLimit      = 0;     // 0 = unlimited
+    std::string screenshotPath;
+    uint32_t    runtimeSeconds   = 0;     // 0 = unlimited
+};
+
+static CliArgs parseArgs(int argc, char* argv[])
+{
+    CliArgs a;
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string_view s(argv[i]);
+        if (s == "--headless") { a.headless = true; }
+        else if (s == "--frames" && i + 1 < argc) { a.framesLimit = std::stoull(argv[++i]); }
+        else if (s == "--screenshot" && i + 1 < argc) { a.screenshotPath = argv[++i]; }
+        else if (s == "--runtime-seconds" && i + 1 < argc) { a.runtimeSeconds = (uint32_t)std::stoul(argv[++i]); }
+        else if (!s.empty() && s.front() != '-' && a.elfPath.empty()) { a.elfPath = std::string(s); }
+        else
+        {
+            std::cerr << "Unrecognized arg: " << s << std::endl;
+        }
+    }
+    return a;
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
-    std::string elfPath;
+    CliArgs cli = parseArgs(argc, argv);
+    std::string elfPath = cli.elfPath;
 
-    if (argc >= 2)
-    {
-        elfPath = argv[1];
-    }
-    else
+    if (elfPath.empty())
     {
         std::filesystem::path exePath(argv[0]);
         elfPath = (exePath.parent_path() / "SLUS_202.68").string();
@@ -606,8 +642,18 @@ int main(int argc, char* argv[])
     if (!std::filesystem::exists(elfPath))
     {
         std::cerr << "ELF not found: " << elfPath << std::endl;
-        std::cerr << "Usage: " << argv[0] << " [path/to/SLUS_202.68]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [path/to/SLUS_202.68] "
+                  << "[--headless] [--frames N] [--screenshot PATH] "
+                  << "[--runtime-seconds N]" << std::endl;
         return 1;
+    }
+
+    if (cli.headless)
+    {
+        // raylib's SetConfigFlags ORs into CORE.Window.flags, so this is
+        // additive with the runtime's later SetConfigFlags(FLAG_WINDOW_RESIZABLE).
+        SetConfigFlags(FLAG_WINDOW_HIDDEN | FLAG_WINDOW_UNFOCUSED);
+        std::cout << "[Headless] FLAG_WINDOW_HIDDEN set; smoke test mode." << std::endl;
     }
 
     PS2Runtime runtime;
@@ -617,7 +663,59 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // Install post-frame hook for headless smoke-test bounds + screenshot.
+    if (cli.framesLimit > 0 || !cli.screenshotPath.empty())
+    {
+        const uint64_t framesLimit = cli.framesLimit;
+        const std::string screenshotPath = cli.screenshotPath;
+        runtime.setPostFrameHook([framesLimit, screenshotPath](uint64_t frameIdx) -> bool {
+            const bool isLastFrame =
+                (framesLimit > 0) && (frameIdx + 1 >= framesLimit);
+            // Screenshot policy:
+            //   - If --frames is set: capture only on the last frame.
+            //   - Else if --screenshot is set: capture every 60 frames so a
+            //     wall-clock-stopped run (--runtime-seconds watchdog) still
+            //     has a recent snapshot. Each call overwrites the previous;
+            //     the final snapshot on disk is the one just before stop.
+            if (!screenshotPath.empty())
+            {
+                const bool capture =
+                    isLastFrame ||
+                    (framesLimit == 0 && (frameIdx % 60u) == 59u);
+                if (capture)
+                {
+                    TakeScreenshot(screenshotPath.c_str());
+                    if (isLastFrame)
+                    {
+                        std::cout << "[Headless] Screenshot written: "
+                                  << screenshotPath << " (frame " << frameIdx << ")"
+                                  << std::endl;
+                    }
+                }
+            }
+            return isLastFrame;
+        });
+    }
+
+    // Wall-clock watchdog: runs in a detached thread, calls requestStop().
+    if (cli.runtimeSeconds > 0)
+    {
+        const uint32_t seconds = cli.runtimeSeconds;
+        std::thread([&runtime, seconds]() {
+            std::this_thread::sleep_for(std::chrono::seconds(seconds));
+            std::cout << "[Headless] Runtime watchdog (" << seconds
+                      << "s) expired; requesting stop." << std::endl;
+            runtime.requestStop();
+        }).detach();
+    }
+
     registerAllFunctions(runtime);
+
+    // Register the [[extra_entry_points]] trampolines. PS2Recomp v0.4 ignores
+    // that TOML key, so `tools/inject_extra_entry_points.py` patches the
+    // generated .cpp files (case + label) and emits this register function.
+    extern void registerExtraEntryPoints(PS2Runtime& runtime);
+    registerExtraEntryPoints(runtime);
 
     // --- Game-specific interior trampolines NOT handled by extra_entry_points ---
     //

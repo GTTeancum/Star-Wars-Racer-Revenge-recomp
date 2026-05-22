@@ -21,6 +21,9 @@ assets/
 # PS2 ELF (user provides)
 SLUS_202.68
 
+# PS2 disc dump (user provides)
+PS2_game/
+
 # PCSX2 reference (huge)
 pcsx2-master/
 
