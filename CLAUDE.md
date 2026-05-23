@@ -77,9 +77,10 @@ If no path given, looks for `SLUS_202.68` next to the executable.
 | CPU (R5900 recompiled functions) | Working | 3478 functions registered, game enters main loop |
 | Threads | Working | Thread create/start/exit functional, trampoline for 0x2f69d0 |
 | Syscalls | Partial | Most kernel syscalls handled, 0x5A/0x5B (QueryBootMode/GetThreadTLS) use fallback |
-| File I/O (CDVD) | Stub | Needs disc image extraction |
-| DMA | Stub | |
-| GS (Graphics) | Stub/WIP | raylib renderer initializes, frame uploads occurring |
+| File I/O (CDVD) | **Blocker** | **Required next milestone.** Disc image needed to load IOP modules (GFX, SIO2MAN, etc.), stream textures, enable save/load. Blocks all visible game content. |
+| DMA | Working | GIF chain DMA (D2, REFE tag) fully implemented; test triangle reaches GS correctly |
+| GS (Graphics) | Partial | PMODE/DISPFB1/DISPLAY1 correct; GIF→GS→framebuffer pipeline works end-to-end. Test triangle renders every frame. 3D (VIF1) blocked by capA/capB=0 (IOP GFX module never loads without CDVD). |
+| IOP / SIF / RPC | Stub | Module state machine unblocked via 0xFFF200 sentinel. sif_dmaSend (IOP log channel) confirmed working. Actual IOP module loading requires CDVD. |
 | SPU2 (Audio) | Stub | |
 | Pad (Input) | Stub | raylib-based input ready in runtime |
 | IPU (MPEG decoder) | Not yet | Python decoder exists in rr_asset_tool.py |
@@ -131,13 +132,106 @@ Skipped in TOML — generates 2.1GB C++ output otherwise.
 |---|---|---|
 | 0x00251B10 | `gs_initState` | Per-frame render dispatch (interior entry in sub_00251A20). First call: initializes GS. Every call: invokes `gs_dispatchHelper` |
 | 0x00251DF0 | `vif1_frameSubmit` | Per-frame VIF1 DMA handler. Polls VIF1_MARK=1, submits DMA chain, clears VIF1_MARK |
-| 0x00257080 | `vif1_buildPacket` | Builds VIF1 DMA packet from GS state descriptors. Sets VIF1_MARK=1 on completion |
+| 0x00257080 | `vif1_buildPacket` | Builds VIF1 DMA packet from GS state descriptors. Sets VIF1_MARK=1 on completion. Checks capB (at 0x43FA08); capB=0 → skips VIF1, calls sub_2596A0 (GIF DMA) instead |
 | 0x00258E70 | `gs_waitCSRFinish` | Spins on GS_CSR FINISH bit (0x12001000 bit 1) until GS rendering completes |
 | 0x00133660 | `gs_dispatchHelper` | Reads `gs_subsystem_ready_flag`; if set and $a0=0, calls `module_renderPrep` + `vblank_waitGated` |
 | 0x001336C0 | `gs_renderHelper` | Helper called from `gs_dispatchHelper`; calls into render list management |
+| 0x002596A0 | `gif_dmaKick` | GIF chain DMA kick (2D path). Confirmed working — fires each frame with test data. Called from vif1_buildPacket when capB=0 |
 | 0x003075A8 | `module_renderPrep` | Reads module table ptr, writes to sub-pointer+84, calls `renderList_manager` |
 | 0x0030B4F0 | `renderList_manager` | Render list / job queue manager; calls `renderList_init` if list is uninitialized |
-| 0x00304718 | `renderList_init` | Initializes render list (called from `renderList_manager` when list ptr is null) |
+| 0x00304718 | `renderList_init` | Initializes render list (called from `renderList_manager` when list ptr is null). Sets fnPtr at modSub8+0x24 = 0x308DF8 |
+| 0x0030B568 | `renderJobWalker` | Walks render job array, calls renderJobDispatch(modSub8, jobStruct) for each job |
+| 0x0030B3F0 | `renderJobDispatch` | Dispatches one render job. Calls JALR to fnPtr (=0x308DF8 = label_308df8). Confirmed called with jobCount=36 each frame |
+| 0x00308DF8 | `label_308df8` | Interior label in sub_00308D08. IOP debug-log send path: optionally calls func_305350, always calls func_30D9A8 with (a0=modCtxPtr+0x54, a1=modCtxPtr+0xE, a2=cmdStreamPtr, a3=count) |
+| 0x0030D9A8 | `iop_renderSend` | Clears 0x44F588, calls func_2F6168(ID, cmdStreamPtr, count) — dispatches IOP log message |
+| 0x002F6168 | `sif_dispatchRender` | IOP connection checker + SIF dispatcher. Drops channel ID, passes (cmdStreamPtr, count) → func_2F7150 |
+| 0x002F7150 | `sif_dmaSend` | **STUB** — Sends ASCII debug/log messages to IOP via SIF DMA. The buffer at cmdStreamPtr (0x44F610) contains plain-text messages like "Begin Hardware Initialization", "Sending texture while getting texture", etc. This is an IOP logging channel, NOT the 3D render command path. Stub returns 0. |
+
+### Module State Machine (sub_00308958)
+
+The game's module system uses a state table at `rdram[modTable+0x1D4]` (allocated by `func_305990` at 0x305990). For module 6 (`gs_initState`):
+
+| Memory | Value | Meaning |
+|---|---|---|
+| `rdram[0x38544C]` | 0x385160 | Pointer to modTable struct |
+| `rdram[modTable+0x1D4]` | 0x44E000 | State table pointer (allocated successfully) |
+| `rdram[0x44E018]` | always 0 | `state[6]` = module 6 state — STUCK at 0 |
+
+**State values for state[6]:**
+- `0` → call sub_00308C08 (→ func_2F6370 → returns 1) + sub_00308BA8 (→ func_2F6378 → func_2FEA30 → event pump). State stays 0 every iteration.
+- `1` → "init in progress", return immediately (no-op)
+- `-1` → "done", write 22 to modTable[0], return 1
+- `fn_ptr` → call fn_ptr(module_idx=6), clear slot → one-shot callback
+
+**Why state[6] never advances:** sub_00308BA8 calls `func_2FEA30(6)` → `func_2FE980(6)` → `func_2FE0C0` → `func_2F6000` (syscall 0x7F) + tail-calls `func_2F57C0`. Both `func_2F57C0` and `func_2F57E0` are interior labels inside `sub_002F5538` which is a `TODO_NAMED` stub — the SIF/IOP/RPC layer is not implemented. Without IOP responses, no code ever writes to rdram[0x44E018], so state[6] stays 0 forever.
+
+**Workaround in place:** Bootstrap Phase 4 writes state[6]=0xFFF200 (synthetic sentinel). The 0xFFF200 hook detects s_iop_init_done==1 (set immediately) and writes state[6]=-1, advancing module 6 to "done." Module 6 then writes 22 to modTable[0] and the boot loop unblocks.
+
+### Per-Frame Render Pipeline (Confirmed Working)
+
+**Per-frame flow (every ~16.67ms):**
+```
+Main loop (frameDispatch)
+  → sets DAT_443DC8=1
+  → calls gs_initState (0x251B10)
+      → gs_dispatchHelper (0x133660) [REAL compiled code, not stub]
+          a0 = sltiu(DAT_443DC8, 1) = 0 (delay slot)
+          → since a0=0 AND gs_subsystem_ready_flag(0x36C100)≠0:
+              calls module_renderPrep(0x389BF0) → renderList_manager
+                → renderJobWalker → renderJobDispatch
+                  → JALR 0x308DF8 (our hook)
+                    → label_308df8 → iop_renderSend → sif_dispatchRender
+                      → sif_dmaSend(streamPtr=0x44F610, count=N) [ASCII log channel]
+          → returns 1 (dispatched)
+      → "Sending texture while getting texture" warning fires (normal, expected)
+      → break (no-op in recomp)
+      → calls vif1_buildPacket(a0=READ32(0x443870), a1=0)
+          → capB=0 → falls through to gif_dmaKick
+            → reads READ32(READ32(0x443870)+0x88) = our test triangle ptr
+            → GIF DMA fires → test triangle renders
+```
+
+**IOP log channel (sif_dmaSend) — NOT the 3D render path:**
+The render job walker dispatches ASCII text messages to the IOP for logging. Confirmed content (in order):
+1. "Begin Hardware Initialization . . .\n" (36 bytes) — boot
+2. "MultiTap in port 1/2 not detected\nMemory Card Initialized!!\n" (90 bytes) — peripheral init
+3. "End Hardware Initialization . . .\n" (34 bytes) — boot complete
+4. "\n" + "Sending texture while getting texture\n" — repeated every frame (texture system warning)
+
+These are diagnostic/status messages, NOT 3D render commands.
+
+**Key addresses:**
+| Address | Role |
+|---|---|
+| 0x44F610 | IOP log message buffer (ASCII text, 0–128 bytes per frame) |
+| 0x443870 | Pointer to GS state struct passed to vif1_buildPacket |
+| 0x442F70 | Alternate GS state pointer (= 0x44C800 = gsState) |
+| 0x44C888 | gsState+0x88 — GIF chain tag ptr used by gif_dmaKick; currently our test triangle |
+| 0x43FA08 | capB — VIF1 write buffer capacity; stays 0 (IOP GFX module not loaded) |
+| 0x43AA04 | capA — same; stays 0 |
+| 0x36C100 | gs_subsystem_ready_flag — non-zero → gs_dispatchHelper dispatches render |
+
+**Why VIF1_MARK never becomes 1:** vif1_buildPacket (0x257080) checks `vif1WriteIdx < capB`. capB=0 always, so the VIF1 3D path is never entered. Falls through to gif_dmaKick (2D path).
+
+**GIF DMA (2D path) confirmed working:** sub_2596A0 fires each frame. Test triangle (bright green at 0x450020) renders correctly.
+
+**Why the "Sending texture while getting texture" warning fires every frame:**
+- gs_dispatchHelper returns 1 (it dispatched module_renderPrep)
+- The texture subsystem (at 0x251C18 in gs_initState path) sees the dispatch occurred while a texture was pending upload
+- This is expected, benign behavior — the code continues to vif1_buildPacket regardless
+
+### 3D Render Pipeline — Fundamental Blocker: CDVD
+
+**The real 3D blocker is missing CDVD support**, not sif_dmaSend:
+- capA/capB are **never written by any EE code** — no generated function writes to 0x43AA04 or 0x43FA08
+- They are written exclusively by the **IOP GFX module** (loaded from CDVD disc as IOCFG.IRX or similar)
+- Without the IOP GFX module, capA/capB=0 forever → VIF1 path never enabled
+
+**What CDVD would unlock:**
+- IOP GFX module → sets capA/capB → enables VIF1 3D rendering
+- IOP module loader → loads SIO2MAN.IRX, etc. → controllers work
+- CDVD texture streaming → textures load → 2D content visible
+- Memory card module → save/load works
 
 ### VBlank / Interrupts
 

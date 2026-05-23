@@ -28,6 +28,13 @@ static std::mutex s_vblankMtx;
 static std::condition_variable s_vblankCv;
 static std::atomic<uint64_t> s_vblankCounter{0};
 
+// IOP init completion gate shared between sif_dmaSend (0x2F7150) and
+// the 0xFFF200 module_keepalive sentinel.
+// Set to 1 by sif_dmaSend after the 3rd IOP init message (Begin/MultiTap/End).
+// When 1, the 0xFFF200 sentinel writes state[6]=-1 instead of re-arming,
+// allowing the module manager to advance to "done" state.
+static std::atomic<uint32_t> s_iop_init_done{0};
+
 // INTC handler for VBlank — runs in the interrupt worker thread.
 // Lightweight: just signal the condition variable and return.
 void vblank_notify(uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/)
@@ -235,7 +242,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 std::thread gameLoopThread([rdram, runtime]() {
                     R5900Context loopCtx{};
                     SET_GPR_U32(&loopCtx, 28, 0x3DD970u); // $gp
-                    SET_GPR_U32(&loopCtx, 29, 0x44BC80u); // $sp
+                    SET_GPR_U32(&loopCtx, 29, 0x449000u); // $sp — separate from gameFrameLoop's 0x44BC80
                     SET_GPR_U32(&loopCtx, 31, 0u);         // $ra = 0 (never returns)
 
                     std::cout << "[Bootstrap] Starting main game loop (0x302DF0) "
@@ -244,7 +251,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     uint64_t restarts = 0;
                     while (!runtime->isStopRequested()) {
                         loopCtx.pc = 0x302DF0u;
-                        SET_GPR_U32(&loopCtx, 29, 0x44BC80u); // reset $sp each restart
+                        SET_GPR_U32(&loopCtx, 29, 0x449000u); // reset $sp each restart — separate stack
                         SET_GPR_U32(&loopCtx, 31, 0u);
 
                         try {
@@ -342,23 +349,102 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     // Write the GS state pointer to DAT_00443870
                     Ps2FastWrite32(rdram, 0x443870u, gsStateAddr);
 
-                    // Unblock sub_00133660's $a0 gate.
+                    // DAT_443DC8: dual-purpose synchronization flag.
                     //
                     // sub_00251A20 at label_251c04:
-                    //   $v1 = mem[0x443DC8]
-                    //   $a0 = sltiu($v1, 1)  →  $a0 = ($v1 < 1) ? 1 : 0
-                    // sub_00133660 gate 2: if ($a0 != 0) early-return (no DMA)
+                    //   $a0 = sltiu(mem[0x443DC8], 1)  →  $a0 = (flag == 0) ? 1 : 0
+                    //   sub_00133660 skips module_renderPrep when $a0 != 0.
+                    //   So: flag != 0 → module_renderPrep runs, jobs dispatched.
+                    //       flag == 0 → module_renderPrep skipped.
                     //
-                    // 0x443DC8 is in BSS (beyond ELF max VA 0x3D5BB0), so it
-                    // stays zero-initialised. That makes $a0=1 every call →
-                    // the gate always fires → no DMA is ever submitted.
+                    // sub_002596A0 at label_259700:
+                    //   bnez mem[0x443DC8], label_2596e0
+                    //   → spin while flag != 0, calling the +0xDC GS callback.
+                    //   → when flag == 0, fall through to label_259710 (GIF DMA).
                     //
-                    // Write 1 here so $v1=1, sltiu(1,1)=0, gate passes.
-                    // This is the "GS subsystem ready" flag written by the real
-                    // boot sequence once IOP modules have initialised; we set it
-                    // eagerly since we're bootstrapping without full IOP support.
+                    // Per-frame protocol (see gameFrameLoop and 0xFFF500 sentinel):
+                    //   1. gameFrameLoop writes 0x443DC8=1 before each state call.
+                    //   2. sub_133660 sees flag=1 → $a0=0 → module_renderPrep runs.
+                    //   3. sub_2596A0 spins at label_2596e0, calls 0xFFF500 callback.
+                    //   4. 0xFFF500 writes 0x443DC8=0 → loop exits → GIF DMA fires.
+                    //   5. Repeat next frame from step 1.
                     Ps2FastWrite32(rdram, 0x443DC8u, 1u);
-                    std::cout << "[Bootstrap] Initialized DAT_443DC8=1 (GS gate)" << std::endl;
+                    std::cout << "[Bootstrap] Initialized DAT_443DC8=1 "
+                                 "(module_renderPrep gate + sub_2596A0 spin)" << std::endl;
+
+                    // --- GIF chain DMA test data for sub_2596A0 ---
+                    //
+                    // sub_2596A0 is called from vif1_buildPacket every frame
+                    // (capacity=0 exit path at label_2571dc). It fires GIF DMA:
+                    //
+                    //   D2_TADR = READ32(READ32(READ32(0x443870)+0x88)+0)
+                    //           = READ32(READ32(gsState+0x88)+0)
+                    //           = READ32(gifDescAddr+0)
+                    //           = gifChainAddr
+                    //
+                    // Memory layout (all addresses in main RDRAM):
+                    //   gifDescAddr  [0x450000]: uint32 = gifChainAddr
+                    //   gifChainAddr [0x450010]: REFE DMA chain tag (QWC=11, ADDR=gifDataAddr)
+                    //   gifDataAddr  [0x450020]: GIF A+D packet (1 GIFtag + 10 pairs = 11 qwords)
+                    {
+                        const uint32_t gifDescAddr  = 0x450000u;
+                        const uint32_t gifChainAddr = 0x450010u;
+                        const uint32_t gifDataAddr  = 0x450020u;
+
+                        // gsState+0x88 → descriptor pointer
+                        Ps2FastWrite32(rdram, gsStateAddr + 0x88u, gifDescAddr);
+
+                        // descriptor word[0] = DMA chain tag address (D2_TADR)
+                        Ps2FastWrite32(rdram, gifDescAddr, gifChainAddr);
+
+                        // REFE chain tag at gifChainAddr:
+                        //   word[0] bits[15:0]=QWC=11, bits[30:28]=ID=0 (REFE), IRQ=0
+                        //   word[1] = ADDR = gifDataAddr  (source of the 11 GIF qwords)
+                        Ps2FastWrite32(rdram, gifChainAddr + 0u, 0x0000000Bu); // QWC=11
+                        Ps2FastWrite32(rdram, gifChainAddr + 4u, gifDataAddr); // ADDR
+
+                        // GIF packet: 1 GIFtag (NLOOP=10,EOP=1,PACKED,NREG=1,REGS=A+D)
+                        //             + 10 A+D pairs (bright-green triangle)
+                        uint8_t* pkt = rdram + gifDataAddr;
+                        uint32_t off = 0;
+                        auto write128 = [&](uint64_t lo, uint64_t hi) {
+                            memcpy(pkt + off,     &lo, 8);
+                            memcpy(pkt + off + 8, &hi, 8);
+                            off += 16;
+                        };
+                        // GIFtag: NLOOP=10, EOP=1, FLG=PACKED, NREG=1, REGS[0]=A+D (0xE)
+                        write128(10ULL | (1ULL << 15) | (1ULL << 60), 0x0EULL);
+                        // FRAME_1: fbw=10 (640px wide), fbp=0, psm=0, fbmsk=0
+                        write128((uint64_t)(10u << 16), 0x4CULL);
+                        // ZBUF_1: zmsk=1 (Z write disabled)
+                        write128(1ULL << 32, 0x4EULL);
+                        // XYOFFSET_1: 0
+                        write128(0ULL, 0x18ULL);
+                        // SCISSOR_1: 0..639 x 0..447
+                        write128((639ULL << 16) | (447ULL << 48), 0x40ULL);
+                        // TEST_1: default
+                        write128(0ULL, 0x47ULL);
+                        // PRIM: triangle (3)
+                        write128(3ULL, 0x00ULL);
+                        // RGBAQ: bright green, a=128, q=1.0
+                        write128(0x20ull | (0xE0ull << 8) | (0x20ull << 16) |
+                                 (0x80ull << 24) | (0x3F800000ULL << 32), 0x01ULL);
+                        // XYZ2 V0: apex (320,100)
+                        write128(((uint64_t)(320u << 4)) |
+                                 ((uint64_t)(100u << 4) << 16), 0x05ULL);
+                        // XYZ2 V1: bot-left (120,400)
+                        write128(((uint64_t)(120u << 4)) |
+                                 ((uint64_t)(400u << 4) << 16), 0x05ULL);
+                        // XYZ2 V2: bot-right (520,400)
+                        write128(((uint64_t)(520u << 4)) |
+                                 ((uint64_t)(400u << 4) << 16), 0x05ULL);
+
+                        std::cout << "[Bootstrap] GIF chain DMA test data at 0x"
+                                  << std::hex << gifDataAddr
+                                  << " (desc=0x" << gifDescAddr
+                                  << " tag=0x" << gifChainAddr << ")"
+                                  << std::dec << std::endl;
+                    }
 
                     // Unblock func_257080 (real VIF1 packet builder) first gate.
                     // READ32(0x442FB8) must equal 1 or func_257080 exits immediately.
@@ -491,6 +577,48 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                         }
                     }
 
+                    // Force DISPFB1 and DISPLAY1 so the framebuffer is actually displayed.
+                    //
+                    // Normally set by func_258E70 via label_251c60 in sub_00251A20, but
+                    // that path is skipped on every boot: the very first call to 0x251B10
+                    // sets rdram[0x442B70]=1 *before* the `beqz rdram[0x442B70]` guard
+                    // fires, so label_251c60 is unreachable.
+                    //
+                    // DISPFB1 (0x12000070):
+                    //   FBP = 0    (frame buffer page 0, i.e. address 0x000000 in VRAM)
+                    //   FBW = 10   (640 px wide; stored as 640/64 = 10 in bits [15:9])
+                    //   PSM = 0    (PSMCT32, 32-bit colour)
+                    //   DBX = 0, DBY = 0
+                    //   Encoding: FBW field is at bits [15:9] → 10 << 9 = 0x1400
+                    //
+                    // DISPLAY1 (0x12000080):
+                    //   DX = 0, DY = 0      (no display-area offset)
+                    //   MAGH = 0, MAGV = 0  (×1 pixel clock = actual 1:1)
+                    //   DW = 639 (0x27F)    stored at bits [43:32]
+                    //   DH = 447 (0x1BF)    stored at bits [54:44]
+                    //   Encoding: (0x1BFull << 44) | (0x27Full << 32) = 0x1BF27F00000000
+                    {
+                        auto& gs = runtime->memory().gs();
+                        std::cout << "[Bootstrap] GS before DISPFB fix:"
+                                  << " DISPFB1=0x" << std::hex << gs.dispfb1
+                                  << " DISPLAY1=0x" << gs.display1
+                                  << " PMODE=0x" << gs.pmode
+                                  << std::dec << std::endl;
+                        if (gs.dispfb1 == 0ull) {
+                            gs.dispfb1 = 0x1400ULL;
+                            std::cout << "[Bootstrap] Forced GS DISPFB1=0x1400" << std::endl;
+                        }
+                        if (gs.display1 == 0ull) {
+                            gs.display1 = 0x1BF27F00000000ULL;
+                            std::cout << "[Bootstrap] Forced GS DISPLAY1=0x1BF27F00000000" << std::endl;
+                        }
+                        std::cout << "[Bootstrap] GS after DISPFB fix:"
+                                  << " DISPFB1=0x" << std::hex << gs.dispfb1
+                                  << " DISPLAY1=0x" << gs.display1
+                                  << " PMODE=0x" << gs.pmode
+                                  << std::dec << std::endl;
+                    }
+
                     // VIF1_MARK (0x10003C30) must stay 0 so 0x251B10 calls func_257080
                     // (real VIF1 packet builder) instead of func_258E70 (stub).
                     // func_257080 will set VIF1_MARK=1 after building the packet;
@@ -498,6 +626,51 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     // Do NOT write 1 here — that was the old (incorrect) approach.
                     std::cout << "[Bootstrap] Initialized GS state at 0x" << std::hex
                               << gsStateAddr << std::dec << " (VIF1_MARK stays 0)" << std::endl;
+                }
+
+                // --- Module state[6] keepalive ---
+                //
+                // The game's module dispatch (sub_00308958) reads state[6] at
+                //   rdram[stateTablePtr + 6*4]  (stateTablePtr = rdram[modTable+0x1D4])
+                //
+                // Without IOP, no async callback ever sets state[6] to a function
+                // pointer, so state[6] stays 0 → the init path runs in a tight
+                // loop calling func_2FEA30(6) (event pump) forever.
+                //
+                // Bootstrap fix: write state[6] = 0xFFF200 (our sentinel fn).
+                // The sentinel re-arms itself so it's called on every iteration
+                // of moduleManager_mainLoop. This advances the dispatch path
+                // without requiring IOP and serves as the hook point for future
+                // actual module-update work.
+                //
+                // Note: delay slot of the jalr already clears state[6] to 0
+                // BEFORE our sentinel runs, so the sentinel must re-write it.
+                {
+                    const uint32_t stateTableAddr = 0x385334u; // modTable+0x1D4
+                    const uint32_t stateTablePtr = *(uint32_t*)(rdram + stateTableAddr);
+                    if (stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu) {
+                        const uint32_t state6Addr = stateTablePtr + 6u * 4u;
+                        *(uint32_t*)(rdram + state6Addr) = 0xFFF200u;
+                        std::cout << "[Bootstrap] Armed module state[6]=0xFFF200"
+                                  << " at rdram[0x" << std::hex << state6Addr
+                                  << "] (stateTP=0x" << stateTablePtr << ")"
+                                  << std::dec << std::endl;
+                        // Signal module-6 "IOP init done" immediately so the
+                        // 0xFFF200 sentinel writes state[6]=-1 on its first call,
+                        // completing module-6 boot cleanly.  Previously this was
+                        // triggered by sif_dmaSend call#3, but with render jobs now
+                        // going through the EE renderer (0x308D08), sif_dmaSend is
+                        // no longer called from the per-frame render path.
+                        s_iop_init_done.store(1u, std::memory_order_release);
+                        std::cout << "[Bootstrap] s_iop_init_done set immediately"
+                                     " (EE renderer path; no sif_dmaSend needed)"
+                                  << std::endl;
+                    } else {
+                        std::cout << "[Bootstrap] WARNING: stateTablePtr=0x"
+                                  << std::hex << stateTablePtr
+                                  << " not valid, skipping state[6] arm"
+                                  << std::dec << std::endl;
+                    }
                 }
 
                 // Debug dump after all initialization
@@ -602,6 +775,36 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 R5900Context diagCtx{};
                 diagCtx.pc = 0u;
                 const uint32_t vif1Mark   = runtime->Load32(rdram, &diagCtx, 0x10003C30u);
+                // Render pipeline depth trace:
+                //   modTable (0x38544C) → modPtr → modPtr+8 → renderList_manager arg
+                //   modPtr+8 is $a0 to renderList_manager; if 0 → renderList never inits
+                const uint32_t modPtr     = modTable; // READ32(0x38544C)
+                uint32_t modSub8 = 0u, renderListPtr = 0u;
+                if (modPtr >= 0x100000u && modPtr < 0x02000000u) {
+                    modSub8 = *(uint32_t*)(rdram + modPtr + 8u);
+                    // modSub8 is also the renderList head pointer candidate
+                    if (modSub8 >= 0x100000u && modSub8 < 0x02000000u) {
+                        renderListPtr = *(uint32_t*)(rdram + modSub8);
+                    }
+                }
+                // vif1_buildPacket gate values:
+                //   0x435A00 = current write index (counter)
+                //   0x43AA04 = capacity when gsState+0x44==1 (v1==1 path)
+                //   0x43FA08 = capacity when gsState+0x44!=1 (v1!=1 path)
+                //   0x44C844 = gsState+0x44 (gate 1 selector: 1=path-A, 0=path-B)
+                //   0x3853B8 = modSub8+0x1C (render ctx ptr → $a0 to 0x308DF8 jalr)
+                const uint32_t vif1WriteIdx = *(uint32_t*)(rdram + 0x435A00u);
+                const uint32_t vif1CapA     = *(uint32_t*)(rdram + 0x43AA04u);
+                const uint32_t vif1CapB     = *(uint32_t*)(rdram + 0x43FA08u);
+                const uint32_t gsState44    = *(uint32_t*)(rdram + 0x44C844u);
+                const uint32_t renderCtxPtr = *(uint32_t*)(rdram + 0x3853B8u);
+                // Module state machine diagnostics:
+                //   modTable+0x1D4 = state table pointer (set by func_305990 via sub_308858)
+                //   stateTable+24  = state[6] for module 6 (must become non-zero for module to run)
+                const uint32_t stateTablePtr = *(uint32_t*)(rdram + modTable + 0x1D4u);
+                const uint32_t modState6 = (stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu)
+                                           ? *(uint32_t*)(rdram + stateTablePtr + 24u)
+                                           : 0xDEADBEEFu;
                 std::cout << "[FrameDiag] frame=" << s_frameCount
                           << " state=0x" << std::hex << stateFunc
                           << " 443DC8=0x" << dat443DC8
@@ -609,10 +812,37 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                           << " initFlag=" << std::dec << (int)initFlag
                           << " 36C100=0x" << std::hex << dat36C100
                           << " modTable=0x" << modTable
+                          << " modSub8=0x" << modSub8
+                          << " renderList=0x" << renderListPtr
                           << " gsState=0x" << gsStatePtr
                           << " ptr442F70=0x" << ptr442F70
                           << " VIF1_MARK=0x" << vif1Mark
+                          << " vif1Idx=0x" << vif1WriteIdx
+                          << " capA=0x" << vif1CapA
+                          << " capB=0x" << vif1CapB
+                          << " gs44=0x" << gsState44
+                          << " renderCtx=0x" << renderCtxPtr
+                          << " stateTP=0x" << stateTablePtr
+                          << " state6=0x" << modState6
                           << std::dec << std::endl;
+
+                // Dump all 32 module state slots once per second (every 60 frames).
+                // Helps identify which modules are not yet "done" (-1).
+                if ((s_frameCount % 60u) == 1u &&
+                    stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu &&
+                    stateTablePtr < 0x02000000u) {
+                    std::cout << "[StateDump] frame=" << s_frameCount << " states:";
+                    for (uint32_t i = 0u; i < 32u; ++i) {
+                        const uint32_t slot = stateTablePtr + i * 4u;
+                        if (slot + 4u <= 0x02000000u) {
+                            const int32_t v = *(int32_t*)(rdram + slot);
+                            if (v != 0)
+                                std::cout << " [" << std::dec << i << "]=0x"
+                                          << std::hex << (uint32_t)v;
+                        }
+                    }
+                    std::cout << std::dec << std::endl;
+                }
             }
 
             if (stateFunc != 0u) {
@@ -620,6 +850,11 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     frameCtx.pc = stateFunc;
                     SET_GPR_U32(&frameCtx, 29, 0x44BC80u); // $sp
                     SET_GPR_U32(&frameCtx, 31, 0u);         // $ra = 0
+
+                    // Per-frame protocol step 1: set 0x443DC8=1 before the
+                    // state call so sub_133660 enables module_renderPrep and
+                    // sub_2596A0 knows to spin (waiting for 0xFFF500 to clear it).
+                    Ps2FastWrite32(rdram, 0x443DC8u, 1u);
 
                     auto fn = runtime->lookupFunction(stateFunc);
                     if (fn) {
@@ -1032,7 +1267,6 @@ int main(int argc, char* argv[])
         // verification of the full game-side VIF1 chain.
         const uint32_t stateFunc = (originalA0 < 0x100000u) ? 0x00251B10u : originalA0;
         if (originalA0 < 0x100000u) {
-            SET_GPR_U32(ctx, 4, stateFunc);
             std::cout << "[setGameState] module-id 0x" << std::hex << originalA0
                       << " -> GS-init 0x" << stateFunc << std::dec << std::endl;
         } else {
@@ -1040,11 +1274,27 @@ int main(int argc, char* argv[])
                       << std::dec << std::endl;
         }
 
-        // Run the native setGameState: writes $a0 to 0x384670 and calls
-        // sub_002F5850 three times (syscall 0x0D) to install state-1/2/3
-        // handlers at 0x2FE300 in the kernel dispatch table.
-        ctx->pc = 0x2FDDF8u;
-        sub_002FDCE8_0x2fdce8(rdram, ctx, runtime);
+        // Write the game state function pointer directly to 0x384670.
+        //
+        // NOTE: calling sub_002FDCE8_0x2fdce8 with ctx->pc=0x2FDDF8 does NOT work
+        // because 0x2FDDF8 is not in the pc-dispatch switch table of that generated
+        // function. The switch falls through to default and runs from 0x2FDCE8 instead,
+        // which is a completely different code path (IOP waiter). Direct write is correct.
+        //
+        // The three SetSyscall side-effects (installing state-1/2/3 handlers at 0x2FE300
+        // via sub_002F5850) are intentionally skipped here — they install exception
+        // context-save handlers that are not needed in the recomp's non-exception model.
+        Ps2FastWrite32(rdram, 0x384670u, stateFunc);
+
+        // Only log state changes (suppress duplicate calls at the same value)
+        static uint32_t s_lastState = 0u;
+        if (stateFunc != s_lastState) {
+            std::cout << "[setGameState] wrote 0x384670 = 0x"
+                      << std::hex << stateFunc << std::dec << std::endl;
+            s_lastState = stateFunc;
+        }
+
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
     });
 
     // sub_002EB0C8: real generated code now runs (was TODO stub; 2F6030/2F60C0 un-stubbed from TOML).
@@ -1122,6 +1372,32 @@ int main(int argc, char* argv[])
     };
     runtime.registerFunction(0x2F8690, stubNoThrowZero); // sub_002F8690 — RA=0x2fdd6c
 
+    // Cycle 26-27 diagnostic: wrap sub_239C40 (boot_subinit) with
+    // entry/exit logging to determine if it ever returns to its caller.
+    // sub_2F84F0 (called first from 0x239d2c) was confirmed to enter and
+    // exit cleanly. If sub_239C40 also exits, the parking is at the
+    // _start tail after sub_239C40 returns.
+    extern void sub_00239C40_0x239c40(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x239C40, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint64_t> s_enter{0}, s_exit{0};
+        const auto e = s_enter.fetch_add(1, std::memory_order_relaxed);
+        if (e < 4u || (e % 1000u) == 0u) {
+            std::cerr << "[sub_239C40:enter] n=" << e
+                      << " pc=0x" << std::hex << ctx->pc
+                      << " ra=0x" << GPR_U32(ctx, 31)
+                      << std::dec << std::endl;
+        }
+        const uint32_t entryPc = ctx->pc != 0x239C40u ? ctx->pc : 0x239C40u;
+        ctx->pc = entryPc;
+        sub_00239C40_0x239c40(rdram, ctx, runtime);
+        const auto x = s_exit.fetch_add(1, std::memory_order_relaxed);
+        if (x < 4u || (x % 1000u) == 0u) {
+            std::cerr << "[sub_239C40:exit ] n=" << x
+                      << " pc=0x" << std::hex << ctx->pc
+                      << std::dec << std::endl;
+        }
+    });
+
     // 0x2F57C0 — interior of stubbed sub_002F5538 (a multi-function
     // syscall-wrapper range that the analyzer rolls into one function).
     // Smoke logs show repeated `[dispatch:recover-pc] bad=0x2f57c0`
@@ -1129,16 +1405,129 @@ int main(int argc, char* argv[])
     // as a noop so the recovery cycle short-circuits.
     runtime.registerFunction(0x2F57C0, stubNoThrowZero);
 
-    // sub_2596A0 wrapper. Two purposes:
-    //   1. Restore ctx->pc to $ra after the call. The recompiled body
-    //      has a jr-$ra path whose switch table happens to include
-    //      label 0x2596E0; when $ra equals that, the jr loops back
-    //      into the function instead of returning, and the outer
-    //      func_257080's check `ctx->pc != post-jal-ra` causes it to
-    //      bail early.
-    //   2. Force VIF1_MARK=1. The real function's purpose is
-    //      DMA-submitting a VIF1 packet whose UNPACK command writes
-    //      VIF1_MARK=1. Our DMA simulation drops this side effect.
+    // 0x308DF8 — interior label of sub_00308D08 (render job callback).
+    //
+    // sub_00304550 (called from renderList_init) stores 0x308DF8 as the
+    // function pointer at modSub8+0x24.  func_304DF0's jalr at 0x304EAC
+    // calls this address for every render job (jobCount=36-37 per frame).
+    // Without a registration, runtime->lookupFunction(0x308DF8) returns null
+    // and the jalr is silently skipped → no geometry submitted → VIF1_MARK=0.
+    //
+    // sub_00308D08_0x308d08.cpp's switch table includes case 0x308df8 →
+    // goto label_308df8, so calling the parent function with ctx->pc=0x308DF8
+    // correctly enters the interior entry point.
+    //
+    // Wrapper logs the first 5 calls: a0=modCtxPtr, a1=cmdStreamPtr (first
+    // byte is the command), a2=count/0x400.
+    {
+        extern void sub_00308D08_0x308d08(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x308DF8, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_rn{0};
+            const uint32_t rn = s_rn.fetch_add(1, std::memory_order_relaxed);
+            // Dump the render command stream: first 5 calls + every 300th call (5s @60fps).
+            // This reveals the command protocol used by the IOP GFX module and how the
+            // stream content changes after HW init messages finish.
+            if (rn < 5u || (rn % 300u) == 0u) {
+                const uint32_t a0 = GPR_U32(ctx, 4);  // modCtxPtr
+                const uint32_t a1 = GPR_U32(ctx, 5);  // cmdStreamPtr
+                const uint32_t a2 = GPR_U32(ctx, 6);  // count
+                printf("[renderJob] rn=%u a0=0x%08x stream=0x%08x count=%u\n  bytes:",
+                       rn, a0, a1, a2);
+                if (a1 >= 0x100000u && a1 < 0x02000000u) {
+                    const uint32_t dumpLen = (a2 < 128u) ? a2 : 128u;
+                    for (uint32_t i = 0u; i < dumpLen; ++i)
+                        printf(" %02x", rdram[a1 + i]);
+                }
+                printf("\n");
+                fflush(stdout);
+            }
+            // Execute label_308df8: the real IOP send path.
+            // sub_00308D08 has two entry points:
+            //   0x308D08 = debug text display path (calls func_30CD10 printf renderer)
+            //   0x308DF8 = IOP send path (calls func_30D9A8 → sif_dispatchRender → sif_dmaSend)
+            //
+            // The render job walker (0x30B568) dispatches via JALR to fnPtr=0x308DF8,
+            // so we must set pc=0x308DF8 to route to label_308df8 (the IOP send path).
+            // sif_dmaSend is still a stub (returns 0), so no VIF1 output yet, but
+            // this allows capturing exactly what render commands the game builds.
+            ctx->pc = 0x308DF8u;
+            sub_00308D08_0x308d08(rdram, ctx, runtime);
+        });
+    }
+
+    // 0x308680 — render list getOrInit, called by func_30CD10 per-iteration.
+    // $v0 return: 0 = ok, non-zero = render list not ready (→ early exit from cd10).
+    // Log first 8 calls so we can see if it ever returns non-zero.
+    {
+        extern void sub_00308680_0x308680(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x308680, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
+            const uint32_t a0 = GPR_U32(ctx, 4);
+            ctx->pc = 0x308680u;
+            sub_00308680_0x308680(rdram, ctx, runtime);
+            if (n < 8u) {
+                const int32_t rv = GPR_S32(ctx, 2);
+                printf("[308680] n=%u a0=0x%08x ret=%d\n", n, a0, rv);
+                fflush(stdout);
+            }
+        });
+    }
+
+    // 0x310440 — GIF DMA flush at the tail of the EE renderer (func_30CD10).
+    // func_30CD10's command-byte dispatcher calls this exactly once after
+    // processing all render commands.  If we never see this log, func_30CD10
+    // exits the loop without reaching the flush, meaning the EE renderer is
+    // incomplete / command stream is malformed / dispatch table returns early.
+    {
+        extern void sub_00310440_0x310440(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x310440, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
+            if (n < 8u || (n % 300u) == 0u) {
+                const uint32_t a0 = GPR_U32(ctx, 4);
+                // a0 is a stack pointer to the render context struct.
+                // [+0x0] = channel type (0/2/4 for GIF DMA path in func_310498)
+                uint32_t chan = 0u;
+                if (a0 >= 0x100000u && a0 < 0x02000000u)
+                    chan = *(uint32_t*)(rdram + a0);
+                printf("[gifFlush] n=%u a0=0x%08x chan=%u\n", n, a0, chan);
+                fflush(stdout);
+            }
+            ctx->pc = 0x310440u;
+            sub_00310440_0x310440(rdram, ctx, runtime);
+        });
+    }
+
+    // sub_002F6870 — "iDisableDmac then return" wrapper.
+    // Native code: addiu $sp,-16 / sd $ra,0($sp) / jal func_2F5970 / ld $ra,0($sp) / addiu $sp,+16 / jr $ra
+    //
+    // ctx->pc strategy: do NOT set ctx->pc.  The JAL preamble in the caller
+    // (sub_00251A20 at 0x251EC8) already set ctx->pc = 0x2F6870 before the
+    // call.  handleSyscall does not touch ctx->pc.  On return ctx->pc is
+    // still 0x2F6870 == __entryPc, so the caller's fixup fires:
+    //   `if (ctx->pc == __entryPc) { ctx->pc = 0x251ED0; }`
+    // restoring the correct return address regardless of $ra state.
+    runtime.registerFunction(0x2F6870, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        // Perform iDisableDmac — the only real side-effect of sub_002F6870.
+        // Skip $sp adjustment: we're not using the PS2 stack at all.
+        SET_GPR_S32(ctx, 3, -0x1D); // $v1 = iDisableDmac syscall number
+        runtime->handleSyscall(rdram, ctx, 0u);
+        // Do NOT set ctx->pc — leave at 0x2F6870 for the __entryPc fixup.
+    });
+
+    // sub_2596A0 wrapper — fix jr-$ra loop-back + first-call diagnostic.
+    //
+    // The recompiled body has a jr-$ra path whose switch table includes
+    // label 0x2596E0; when $ra equals that address the jr loops back into
+    // the function instead of returning.  The outer func_257080 then sees
+    // ctx->pc != post-jal-ra and bails early.  We force ctx->pc = $ra on
+    // exit to break that loop.
+    //
+    // With DAT_443DC8=0 (set in bootstrap Phase 4), sub_2596A0 exits its
+    // GS-ready wait loop immediately and fires GIF DMA from
+    //   READ32(READ32(gsState+0x88)+0) = 0x450010 (our test chain tag)
+    // delivering the pre-built bright-green triangle to the GS every frame.
     extern void sub_002596A0_0x2596a0(uint8_t*, R5900Context*, PS2Runtime*);
     runtime.registerFunction(0x2596A0, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
         ctx->pc = 0x2596A0u;
@@ -1147,7 +1536,18 @@ int main(int argc, char* argv[])
         if (ctx->pc != ra) {
             ctx->pc = ra;
         }
-        runtime->memory().writeIORegister(0x10003C30u, 1u);
+        // Brief diagnostic: log the first 3 calls so we can confirm the GIF
+        // DMA path is being exercised, then one log every 600 calls (~10 s).
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
+        if (n < 3u || (n % 600u) == 0u) {
+            const uint32_t dc8 = *(uint32_t*)(rdram + 0x443DC8u);
+            const uint32_t desc = *(uint32_t*)(rdram + 0x450000u);
+            const uint32_t tag0 = *(uint32_t*)(rdram + 0x450010u);
+            printf("[sub_2596A0] n=%u dc8=0x%x desc=0x%x tag0=0x%x\n",
+                   n, dc8, desc, tag0);
+            fflush(stdout);
+        }
     });
 
     // Decision (cycle 3 / 2026-05-22 05:45): tried `runtime.registerFunction(
@@ -1193,16 +1593,364 @@ int main(int argc, char* argv[])
         Ps2FastWrite32(rdram, 0x44765Cu, 0u);
         SET_GPR_U32(ctx, 2, 0u);   // $v0 = 0 (success, 0 items)
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
+
+        // Track calls and decode the command stream for analysis.
+        //
+        // sif_dispatchRender (0x2F6168) strips the channel ID and passes:
+        //   $a0 = cmdStreamPtr (RDRAM address, e.g. 0x44F610)
+        //   $a1 = count (number of bytes in command stream)
+        //   $a2 = count (repeated — possibly an arg to the SIF DMA transfer)
+        //
+        // The command stream is binary render commands sent to the IOP GFX module
+        // via SIF DMA.  The IOP processes these to produce VIF1 DMA output.
+        static std::atomic<uint32_t> s_iop_calls{0};
+        const uint32_t n = s_iop_calls.fetch_add(1, std::memory_order_relaxed);
+
+        const uint32_t streamPtr = GPR_U32(ctx, 4);  // cmdStreamPtr (e.g. 0x44F610)
+        const uint32_t count     = GPR_U32(ctx, 5);  // byte count
+
+        // Dump first 16 calls fully, then one per second (60 frames) to track changes.
+        if (n < 16u || (n % 60u) == 0u) {
+            printf("[sif_dmaSend] call#%u streamPtr=0x%08x count=%u\n",
+                   n, streamPtr, count);
+            // Dump the raw command bytes as hex + ASCII.
+            if (streamPtr >= 0x100000u && streamPtr < 0x2000000u && count > 0u) {
+                const uint8_t* p = rdram + streamPtr;
+                const uint32_t dumpLen = (count < 128u) ? count : 128u;
+                printf("[sif_dmaSend]   hex:");
+                for (uint32_t i = 0; i < dumpLen; ++i)
+                    printf(" %02x", p[i]);
+                printf("\n[sif_dmaSend]   ascii: \"");
+                for (uint32_t i = 0; i < dumpLen; ++i) {
+                    uint8_t c = p[i];
+                    if (c >= 0x20 && c < 0x7F) printf("%c", c);
+                    else printf("\\x%02x", c);
+                }
+                printf("\"\n");
+            }
+            fflush(stdout);
+        }
+
+        // Note: s_iop_init_done is now set by Bootstrap Phase 4 immediately,
+        // so this path is no longer needed for module-6 boot completion.
+        // Kept here as a fallback in case sif_dmaSend is called from a
+        // non-render path during boot (e.g., module-init IOP messages).
+        if (n == 2u && !s_iop_init_done.load(std::memory_order_acquire)) {
+            s_iop_init_done.store(1u, std::memory_order_release);
+            printf("[sif_dmaSend] call#%u: IOP init done (fallback path)\n", n);
+            fflush(stdout);
+        }
+    });
+
+    // --- 0x2F84F0  IOP-init bypass (sub_002F84F0) ---
+    //
+    // Called from boot_subinit (sub_00239C40 at label_239d2c) with $a0=0.
+    // Real function: initialises SIF, calls func_2F5FB0 (IOP bind, returns 0
+    // without IOP), then calls func_2F8298 (SIF receive wait) followed by
+    // func_2F7DD8($a0=0) spin until mem[0x447B80] != 0.
+    //
+    // Race: gameLoopThread calls sub_239C40 → func_2F84F0 BEFORE the bootstrap
+    // Phase 4 can write mem[0x447B80]=1, causing an infinite spin.  The caller
+    // doesn't branch on the return value of func_2F84F0 (label_239d34 calls
+    // func_311DF0 unconditionally), so a stub that returns 1 immediately is safe.
+    runtime.registerFunction(0x2F84F0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_U32(ctx, 2, 1u);   // $v0 = 1 (success/ready)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x2F7370  IOP-connection init bypass (func_2F7370) ---
+    //
+    // Called from func_2F6168 when mem[0x383AD0]==0 (IOP not yet bound).
+    // Returns 0 → func_2F6168 returns -1 (failure).
+    // Returns non-zero → func_2F6168 sets mem[0x383AD0]=1 and calls func_2F7150.
+    // Stub returns 1 so the IOP-connection gate unlocks and func_2F7150 runs.
+    runtime.registerFunction(0x2F7370u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_U32(ctx, 2, 1u);   // $v0 = 1 (connected)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x311DF0  IOP SIF-module init bypass (func_311DF0) ---
+    //
+    // Called from boot_subinit (sub_00239C40 at label_239d34) with $a0=0.
+    // The caller doesn't branch on the return value.
+    runtime.registerFunction(0x311DF0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_U32(ctx, 2, 0u);   // $v0 = 0 (pass-through, caller ignores)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x312DA0  IOP SIF DMA completion spin-bypass (sub_00312DA0) ---
+    //
+    // Calls func_2F8B60 (SIF DMA send) then polls struct[+0x24] in a tight
+    // delay loop waiting for IOP completion.  Without IOP emulation the
+    // completion flag stays 0 and the thread spins forever at label_312dd8.
+    // Stubbing to return 1 immediately is safe — callers check the return
+    // value only to know whether the transfer was dispatched, not for
+    // correctness of the IOP side.
+    runtime.registerFunction(0x312DA0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_U32(ctx, 2, 1u);   // $v0 = 1 (done)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x2E8D90  Module-ready wait bypass (sub_002E8D90) ---
+    //
+    // Waits for a PS2 module to become ready by polling func_305700 →
+    // func_305990 which reads the module table at mem[0x38544C].  Without IOP
+    // loading modules this check always returns 0 and the loop spins forever
+    // at label_2e8db4.  Returns 1 (ready) immediately.
+    runtime.registerFunction(0x2E8D90u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_U32(ctx, 2, 1u);    // $v0 = 1 (ready)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x315800  IOP SIF DMA multi-send spin-bypass (sub_00315800) ---
+    //
+    // Sends 5 sequential SIF DMA commands (0x80000901–0x80000905) and polls
+    // struct+0x24 for IOP completion on each one.  Without IOP emulation the
+    // completion flag stays 0 and the outer retry loop spins forever at
+    // label_315828.  Same pattern as sub_00312DA0.  Returns 1 = success.
+    runtime.registerFunction(0x315800u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_U32(ctx, 2, 1u);    // $v0 = 1 (success)
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x5c  FlushCache BIOS stub bypass ---
+    //
+    // On real PS2 the EE BIOS places a FlushCache syscall trampoline at
+    // virtual address 0x5c (kseg0 low stub area).  Game code reaches it via
+    // a tail-call chain:
+    //   sub_239C40 → 0x23a108 → func_304398 → func_1000b8 →
+    //   sub_2FEA30 → func_2FE980 → func_2FE0C0 → func_2F6000 →
+    //   func_2F6010 → func_2F57C0 (stubNoThrowZero) → j 0x5c
+    //
+    // Because 0x5c is below the ELF load base (0x100000) it was never
+    // recompiled, so lookupFunction(0x5c) returned null and the runtime
+    // printed a flood of "Function at address 0x5c not found" warnings,
+    // recovering to ra=0x23a13c and re-entering sub_239C40 in a tight
+    // pseudo-loop (~8192 iterations before s_recoverCount cap).
+    //
+    // FlushCache is a pure cache-management operation; on PC there is no
+    // PS2 cache to flush, so a no-op returning 0 is correct.
+    runtime.registerFunction(0x5Cu, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 0);         // $v0 = 0 (success)
+        ctx->pc = GPR_U32(ctx, 31);     // jr $ra
+    });
+
+    // --- 0x2FEA30  _start exit-path block ---
+    //
+    // _start (0x100008) tail-calls func_2FEA30 after boot_subinit (sub_239C40)
+    // returns.  On real PS2, boot_subinit never returns (moduleMain loops
+    // forever).  In the recomp, moduleMain exits early so _start reaches this
+    // tail-call.  func_2FEA30 saves $ra, calls func_2FE980, restores $ra
+    // (= 0x1000ac), then tail-calls func_2F57C0 (stubNoThrowZero) which
+    // returns via $ra = 0x1000ac → back to label_1000ac in _start → repeat.
+    //
+    // Block Thread-0 here permanently.  This mirrors what real hardware does
+    // (this path is simply never reached) while stopping the tight loop that
+    // generated thousands of bad-address warnings per second.
+    runtime.registerFunction(0x2FEA30u, +[](uint8_t* /*rdram*/, R5900Context* /*ctx*/, PS2Runtime* /*runtime*/) {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(60));
+        }
+    });
+
+    // --- 0x1000B8  ELF exit-path no-op stub ---
+    //
+    // sub_001000B8 is the ELF's "program exit" trampoline. Its first
+    // instruction is `j func_2FEA30` (our permanent-sleep stub) — so
+    // entering at 0x1000B8 always blocks unless we intercept it.
+    //
+    // func_304398 (0x304398) ALWAYS tail-calls func_1000B8 at the end of
+    // every code path, and sub_239C40 (boot_subinit) calls func_304398(-1)
+    // when func_237640 returns 0 (which it does on first boot because
+    // mem[0x382B80] struct isn't fully initialised). The resulting chain:
+    //
+    //   dispatchLoop → sub_239C40(label_23a108)
+    //     → jal func_304398(-1)
+    //       → j func_1000B8          ← trapped here
+    //         → j func_2FEA30        ← our blocking lambda
+    //
+    // Stubbing 0x1000B8 to return immediately lets func_304398 return to
+    // sub_239C40 at 0x23A118, which then sets $v0=1 and falls into the
+    // module-vtable spin loop at label_23a124.  That loop exits because
+    // vtable+0x30 → 0xFFF400 returns 0 (pre-boot vtable at 0x44F800 is
+    // populated before runtime.run(); see below).
+    //
+    // This is safe: on real PS2, func_1000B8 / func_2FEA30 are the
+    // ExitDeleteThread tail-chain; they're never reached during normal
+    // game execution.
+    runtime.registerFunction(0x1000B8u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 0);         // $v0 = 0
+        ctx->pc = GPR_U32(ctx, 31);     // jr $ra
     });
 
     // --- 0x00FFF500  gsState-callback sentinel ---
     // Wired into gsState+0xDC by bootstrap. sub_2596A0 jalrs through
-    // this slot every frame (~30 times per frame). On a real PS2 the
-    // game would install its render callback here. We don't have that,
-    // so this sentinel just returns 0.
-    runtime.registerFunction(0x00FFF500u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+    // this slot while spinning at label_2596e0 (while 0x443DC8 != 0).
+    // Step 4 of the per-frame protocol: clear 0x443DC8 → sub_2596A0's
+    // bnez exits, falls through to label_259710, and fires GIF DMA.
+    runtime.registerFunction(0x00FFF500u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        // Signal sub_2596A0 that it can proceed to GIF DMA kick.
+        Ps2FastWrite32(rdram, 0x443DC8u, 0u);
         SET_GPR_S32(ctx, 2, 0);
         ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    // --- renderList_manager (0x30B4F0) diagnostic wrapper ---
+    // Removed verbose logging; real function runs unconditionally.
+    // (Kept as passthrough so register slot stays claimed.)
+    extern void sub_0030B4F0_0x30b4f0(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x30B4F0, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        ctx->pc = 0x30B4F0u;
+        sub_0030B4F0_0x30b4f0(rdram, ctx, runtime);
+    });
+
+    // --- sub_0030B3F0 (0x30B3F0) job-dispatch diagnostic wrapper + synthetic injection ---
+    //
+    // func_30B3F0 is the render-job executor called ~40× per frame from
+    // sub_0030B568 (the render job-list walker).  It reads READ32(s0+8) to
+    // get a job-entry count, then dispatches to func_304DF0.
+    //
+    // Job struct layout (stack-allocated by sub_0030B568, $a1 = ptr):
+    //   [+0]  jobArrayPtr  — pointer to array of 8-byte job entries
+    //   [+4]  status       — cleared after processing
+    //   [+8]  jobCount     — number of job entries (0 = no work)
+    // Job entry layout (8 bytes each):
+    //   [+0]  cmdStreamPtr — pointer to command byte stream
+    //   [+4]  count
+    //
+    // modSub8 ($a0):
+    //   [+0x1C] renderCtxPtr — passed as $a0 to func_304DF0's JALR target
+    //   [+0x24] fnPtr        — JALR target (= 0x308DF8, set by renderList_init)
+    //
+    // Diagnostics: log first 5 calls with full struct contents.
+    // Injection: for first call where jobCount==0, probe the render command
+    // dispatch table at 0x3C6391 for a non-zero flags byte, then write a
+    // synthetic job into the job struct so func_304DF0 actually dispatches.
+    extern void sub_0030B3F0_0x30b3f0(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x30B3F0, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
+
+        const uint32_t a0 = GPR_U32(ctx, 4);  // modSub8 ptr
+        const uint32_t a1 = GPR_U32(ctx, 5);  // job struct (stack)
+
+        // --- Full struct diagnostics for first 5 calls ---
+        if (n < 5u) {
+            uint32_t jobPtr = 0u, jobStatus = 0u, jobCount = 0u;
+            uint32_t entry0 = 0u, entry4 = 0u;
+            uint32_t modCtxPtr = 0u, fnPtr = 0u;
+
+            if (a1 >= 0x100000u && a1 < 0x02000000u) {
+                jobPtr    = *(uint32_t*)(rdram + a1 + 0u);
+                jobStatus = *(uint32_t*)(rdram + a1 + 4u);
+                jobCount  = *(uint32_t*)(rdram + a1 + 8u);
+                if (jobPtr >= 0x100000u && jobPtr < 0x02000000u) {
+                    entry0 = *(uint32_t*)(rdram + jobPtr + 0u);
+                    entry4 = *(uint32_t*)(rdram + jobPtr + 4u);
+                }
+            }
+            if (a0 >= 0x100000u && a0 < 0x02000000u) {
+                modCtxPtr = *(uint32_t*)(rdram + a0 + 0x1Cu);
+                fnPtr     = *(uint32_t*)(rdram + a0 + 0x24u);
+            }
+            printf("[jobDispatch] n=%u a0=0x%08x a1=0x%08x "
+                   "jobPtr=0x%08x status=%u jobCount=%u "
+                   "entry[0]=0x%08x entry[4]=%u "
+                   "modCtx=0x%08x fnPtr=0x%08x\n",
+                   n, a0, a1,
+                   jobPtr, jobStatus, jobCount,
+                   entry0, entry4,
+                   modCtxPtr, fnPtr);
+            fflush(stdout);
+        }
+
+        // --- Synthetic job injection (first call where jobCount==0) ---
+        //
+        // Probe the render command dispatch table at 0x3C6391:
+        //   rdram[cmd + 0x3C6391] = flags byte for that command
+        //   cmd == 0  → end-of-stream (exit dispatcher)
+        //   flags != 0 → command has a handler (safe to dispatch)
+        //
+        // Build a single-entry job with one command byte, inject into the
+        // stack job struct, and let the real func_304DF0 dispatch it normally.
+        // Scratch areas 0x44D800 (job array) and 0x44D900 (cmd stream) are
+        // above the BSS wipe ceiling (0x44F600) so they survive _start init.
+        static std::atomic<bool> s_injected{false};
+        if (n < 5u && a1 >= 0x100000u && a1 < 0x02000000u && !s_injected.load()) {
+            const uint32_t jobCount = *(uint32_t*)(rdram + a1 + 8u);
+            if (jobCount == 0u) {
+                // Find first cmd byte in [1..255] with non-zero dispatch flags
+                uint8_t validCmd = 0u;
+                uint8_t cmdFlags = 0u;
+                for (uint32_t cmd = 1u; cmd < 256u; ++cmd) {
+                    const uint8_t flags = rdram[0x3C6391u + cmd];
+                    if (flags != 0u) {
+                        validCmd = (uint8_t)cmd;
+                        cmdFlags = flags;
+                        break;
+                    }
+                }
+
+                if (validCmd != 0u) {
+                    s_injected.store(true);
+
+                    const uint32_t jobArrayAddr  = 0x44D800u;
+                    const uint32_t cmdStreamAddr = 0x44D900u;
+
+                    // Job entry array: one entry {cmdStreamAddr, count=1}, then null
+                    *(uint32_t*)(rdram + jobArrayAddr +  0u) = cmdStreamAddr;
+                    *(uint32_t*)(rdram + jobArrayAddr +  4u) = 1u;
+                    *(uint32_t*)(rdram + jobArrayAddr +  8u) = 0u;
+                    *(uint32_t*)(rdram + jobArrayAddr + 12u) = 0u;
+
+                    // Command stream: validCmd then 0 (end-of-stream)
+                    rdram[cmdStreamAddr + 0u] = validCmd;
+                    rdram[cmdStreamAddr + 1u] = 0u;
+
+                    // Patch job struct: jobArrayPtr and jobCount
+                    *(uint32_t*)(rdram + a1 + 0u) = jobArrayAddr;
+                    *(uint32_t*)(rdram + a1 + 8u) = 1u;
+
+                    printf("[jobDispatch] INJECTED synthetic job n=%u: "
+                           "cmd=0x%02x flags=0x%02x "
+                           "jobArray=0x%08x cmdStream=0x%08x\n",
+                           n, validCmd, cmdFlags, jobArrayAddr, cmdStreamAddr);
+                    fflush(stdout);
+                } else {
+                    printf("[jobDispatch] WARNING n=%u: "
+                           "dispatch table 0x3C6391 has no non-zero entry — "
+                           "table may not be initialized yet\n", n);
+                    fflush(stdout);
+                }
+            }
+        }
+
+        ctx->pc = 0x30B3F0u;
+        sub_0030B3F0_0x30b3f0(rdram, ctx, runtime);
+    });
+
+    // --- 0x2FEA30  func_2FEA30 — IOP event-pump stub ---
+    //
+    // On real HW this blocks the module-manager thread until the IOP sends a
+    // completion callback (via SifCallRpc/WaitSema → func_2F57C0).  Without a
+    // running IOP, SifCallRpc (syscall 0x7F) never gets a response and the
+    // thread hangs forever, preventing sub_00308958 from cycling back to check
+    // state[6]=0xFFF200.
+    //
+    // This stub returns -1 immediately (the same value sub_002F5538 TODO_NAMED
+    // would eventually return), letting the thread cycle.  sub_00308958 with
+    // state[6]=0 calls func_308C08 + func_308BA8 → func_2FEA30 per iteration.
+    // When the bootstrap later writes state[6]=0xFFF200, the next iteration
+    // sees it and calls our modUpdate6 sentinel instead.
+    runtime.registerFunction(0x2FEA30u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
+        if (n == 0u) {
+            printf("[2FEA30] IOP event-pump stub active (returns -1 to unblock module thread)\n");
+            fflush(stdout);
+        }
+        SET_GPR_S32(ctx, 2, -1);       // $v0 = -1
+        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
 
     // --- 0x00FFF400  zero-return sentinel ---
@@ -1213,6 +1961,57 @@ int main(int argc, char* argv[])
     runtime.registerFunction(0x00FFF400u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
         SET_GPR_S32(ctx, 2, 0);
         ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    // --- 0x00FFF200  module_keepalive_6 (synthetic) ---
+    //
+    // The game's module state machine (sub_00308958) reads state[6] from
+    //   rdram[stateTablePtr + 24]  (stateTablePtr = rdram[modTable+0x1D4]).
+    //
+    // Without IOP, no async callback sets state[6] to a function pointer, so
+    // the init path (state[6]==0) loops forever calling the event pump (func_2FEA30),
+    // which is registered as an infinite sleep — causing the game-loop thread to hang.
+    //
+    // Bootstrap Phase 4 writes state[6] = 0xFFF200. This sentinel function is
+    // then called via jalr from sub_00308958:label_308a20 with:
+    //   $a0 = module_index = 6
+    //   $ra = 0x308A2C (return address inside sub_00308958)
+    //   state[6] already cleared to 0 (delay-slot before the jalr)
+    //
+    // Behaviour:
+    //   - Before IOP init completes (s_iop_init_done == 0): re-arms state[6]=0xFFF200
+    //     to prevent the module manager from looping through the func_2FEA30 hang path.
+    //   - After IOP init completes (s_iop_init_done == 1, set by sif_dmaSend call#3):
+    //     writes state[6]=-1 to let the module manager advance to "done" state,
+    //     which writes 22 to modTable[0] and unblocks the boot loop.
+    runtime.registerFunction(0x00FFF200u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
+
+        const uint32_t stateTablePtr = *(const uint32_t*)(rdram + 0x385334u);
+        const bool valid = (stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu);
+
+        if (s_iop_init_done.load(std::memory_order_acquire) != 0u) {
+            // IOP init done — advance module 6 to "done" state
+            if (valid) {
+                *(uint32_t*)(rdram + stateTablePtr + 24u) = 0xFFFFFFFFu; // -1 = done
+            }
+            if (n == 0u) {
+                printf("[modUpdate6] IOP done, wrote state[6]=-1 (module 6 advancing to done)\n");
+                fflush(stdout);
+            }
+        } else {
+            // IOP not done yet — re-arm to prevent func_2FEA30 hang
+            if (valid) {
+                *(uint32_t*)(rdram + stateTablePtr + 24u) = 0xFFF200u;
+            }
+            if (n < 2u) {
+                printf("[modUpdate6] n=%u re-armed state[6]=0xFFF200 (IOP init pending)\n", n);
+                fflush(stdout);
+            }
+        }
+
+        ctx->pc = GPR_U32(ctx, 31); // jr $ra
     });
 
     // --- 0x00FFF300  test_state_fn (synthetic) ---
@@ -1255,6 +2054,43 @@ int main(int argc, char* argv[])
     {
         std::cerr << "Failed to load ELF: " << elfPath << std::endl;
         return 1;
+    }
+
+    // --- Pre-boot RDRAM initialisation (must happen after loadELF, before run) ---
+    //
+    // _start zeroes BSS in the range 0x3D5A00-0x44F600 during its first
+    // instructions.  Any rdram writes inside that range made before
+    // runtime.run() will be wiped.  We use addresses ABOVE 0x44F600 so
+    // the values survive.
+    //
+    // sub_239C40 (boot_subinit) is called by _start almost immediately.
+    // At label_23a124 it reads rdram[0x382B80] to get the module-struct
+    // base pointer, then dereferences vtable chains from it.  The 3-second
+    // bootstrap thread fires too late; we must prime the chain here.
+    //
+    // rdram[0x382B80] is in ELF-loaded data (VA < 0x3D5A00) so it
+    // survives the BSS zero-loop.  The vtable area at 0x44F800+ is above
+    // the BSS ceiling and likewise survives.
+    //
+    // Flow when sub_239C40 hits label_23a124:
+    //   $a0 = rdram[0x382B80] = 0x44F800
+    //   $t9 = rdram[0x44F800 + 0x27C] = 0x44FB00
+    //   $t9 = rdram[0x44FB00 + 0x30 ] = 0xFFF400  →  returns $v0=0
+    //   bnez $v0 → false → loop exits → sub_239C40 proceeds to return.
+    {
+        uint8_t* preRdram = runtime.memory().getRDRAM();
+        const uint32_t modBase   = 0x44F800u;   // above BSS ceiling 0x44F600
+        const uint32_t modVTable = 0x44FB00u;
+        Ps2FastWrite32(preRdram, 0x382B80u,         modBase);
+        Ps2FastWrite32(preRdram, modBase  + 0x27Cu, modVTable);
+        Ps2FastWrite32(preRdram, modVTable + 0x30u, 0x00FFF400u);
+        Ps2FastWrite32(preRdram, modVTable + 0x9Cu, 0x00FFF400u);
+        Ps2FastWrite32(preRdram, modVTable + 0x4Cu, 0x00FFF400u);
+        std::cout << "[PreBoot] Module vtable pre-populated: "
+                  << "rdram[0x382B80]=0x" << std::hex << modBase
+                  << " vtable=0x" << modVTable
+                  << " (+0x30/+0x4C/+0x9C -> 0xFFF400)"
+                  << std::dec << std::endl;
     }
 
     // --- Bootstrap thread ---
