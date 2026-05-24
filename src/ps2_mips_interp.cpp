@@ -15,7 +15,7 @@
 
 static constexpr uint32_t PHYS_MASK    = 0x1FFFFFFFu; // strip kseg0/1 bits
 static constexpr uint32_t RDRAM_SIZE   = 0x2000000u;  // 32 MB
-static constexpr uint32_t MAX_INSNS    = 500000u;      // safety fuse per call
+static constexpr uint32_t MAX_INSNS    = 20000000u;    // safety fuse per call (20M for giant game fn)
 static constexpr int      MAX_DEPTH    = 64;           // max nested jal depth
 
 static inline uint32_t physAddr(uint32_t va) { return va & PHYS_MASK; }

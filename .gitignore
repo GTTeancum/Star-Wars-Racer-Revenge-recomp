@@ -12,6 +12,19 @@ out/
 # Generated recomp output
 src/generated/
 
+# sub_0031D200 chunk split + clang-cl objs (2.8GB+ — not for repo)
+src/generated_chunks/
+src/clang_objs/
+
+# Per-cycle diagnostic dumps left in repo root
+diag*.txt
+diag*.png
+err_ee.txt
+out_ee.txt
+run_out.txt
+test_output.png
+smoke_test_*.png
+
 # Game assets (large, not for repo)
 assets/
 *.bin
@@ -54,6 +67,7 @@ Desktop.ini
 .DS_Store
 
 # Logs and runtime output
+logs/
 *.log
 build_log.txt
 run_output.txt

@@ -6,7 +6,9 @@
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_mips_interp.h"
 #include <iostream>
+#include <atomic>
 
 #define MAKE_STUB(name) \
     void name(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { \
@@ -21,8 +23,26 @@ MAKE_STUB(entry_1eec40_0x1f1d80)
 MAKE_STUB(entry_2a3c80_0x2a4b30)
 MAKE_STUB(entry_2a3c80_0x2a4b70)
 MAKE_STUB(sub_001BA130_0x1ba130)
-MAKE_STUB(sub_0031D200_0x31d200)
-MAKE_STUB(entry_31d280_0x3d5a00)
+// sub_0031D200_0x31d200 — game logic state machine (748KB, 55627 labels).
+//
+// When chunk .obj files are available (compiled via build_chunks_parallel.py),
+// CMakeLists replaces this with the master dispatcher + 120 compiled chunks.
+// Until then, we fall back to the MIPS interpreter reading opcodes from rdram.
+// The interpreter dispatches JAL/JALR to the recompiled function table, so all
+// OTHER compiled functions are called at native speed — only the scaffolding
+// code within sub_0031D200 itself is interpreted.
+void sub_0031D200_0x31d200(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    const auto n = s_calls.fetch_add(1u, std::memory_order_relaxed);
+    if (n < 3u || (n % 50000u) == 0u) {
+        std::cout << "[D200-interp] call#" << n
+                  << " pc=0x" << std::hex << ctx->pc << std::dec << std::endl;
+    }
+    interpretMipsKseg0(rdram, ctx, runtime, ctx->pc);
+}
+// entry_31d280_0x3d5a00 — interior label within sub_0031D200, handled by master dispatcher
+// (when chunks are compiled the master dispatcher handles all 558 entry points)
 
 // Functions in the 0x308xxx-0x309xxx range introduced by Ghidra CSV
 MAKE_STUB(sub_00308C90_0x308c90)

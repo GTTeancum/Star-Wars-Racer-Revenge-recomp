@@ -1003,8 +1003,17 @@ int main(int argc, char* argv[])
 
     if (elfPath.empty())
     {
-        std::filesystem::path exePath(argv[0]);
-        elfPath = (exePath.parent_path() / "SLUS_202.68").string();
+        // Check CWD first so that running from the PS2_game/ directory works
+        // and the runtime's cdRoot resolves to CWD (where all disc files live).
+        if (std::filesystem::exists("SLUS_202.68"))
+        {
+            elfPath = "SLUS_202.68";
+        }
+        else
+        {
+            std::filesystem::path exePath(argv[0]);
+            elfPath = (exePath.parent_path() / "SLUS_202.68").string();
+        }
     }
 
     if (!std::filesystem::exists(elfPath))
@@ -1693,12 +1702,23 @@ int main(int argc, char* argv[])
 
     // --- 0x2E8D90  Module-ready wait bypass (sub_002E8D90) ---
     //
-    // Waits for a PS2 module to become ready by polling func_305700 →
-    // func_305990 which reads the module table at mem[0x38544C].  Without IOP
-    // loading modules this check always returns 0 and the loop spins forever
-    // at label_2e8db4.  Returns 1 (ready) immediately.
+    // On real HW: polls func_305700 → func_305990 (reads module table at
+    // mem[0x38544C]) and spins at label_2e8db4 until the module is ready.
+    // Returns a non-zero pointer/handle to the ready module on success, or 0
+    // if the module was never initialised.
+    //
+    // WHY WE RETURN 0 (not 1):
+    //   Callers treat the return value as a pointer, not a bool.  If we return 1,
+    //   that "pointer" (= 0x00000001) is passed to func_141300 → func_1048F0 →
+    //   sub_001416C0, which reads READ32(0x1+0x1C) = READ32(0x1D) — a garbage RDRAM
+    //   value that is non-zero, making sub_1416C0's linked-list walk infinite.
+    //
+    //   Returning 0 makes every caller's `beqz $v0` branch skip the module-ready
+    //   setup (func_141300 etc.), which is the correct no-IOP behaviour.  The game
+    //   continues past these optional dependency registrations and func_13FDA0 runs
+    //   to completion.
     runtime.registerFunction(0x2E8D90u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        SET_GPR_U32(ctx, 2, 1u);    // $v0 = 1 (ready)
+        SET_GPR_U32(ctx, 2, 0u);    // $v0 = 0 (module not ready — no IOP)
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
     });
 
@@ -1963,6 +1983,96 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
+    // --- 0x00FFF500  one-return sentinel ---
+    //
+    // Companion to FFF400. Returns $v0=1 (non-zero / success).
+    // Installed at rdram[modVTable + 0x9C] so that sub_237640's vtable[0x9C]
+    // call returns non-zero, which triggers the branch to label_2376a0 and
+    // ultimately calls func_13FDA0 (render infrastructure init).
+    //
+    // Without this, vtable[0x9C] returned 0 (FFF400 was used) and the bnez
+    // at label_237670 was never taken, so func_13FDA0 was silently skipped.
+    runtime.registerFunction(0x00FFF500u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        SET_GPR_S32(ctx, 2, 1);        // $v0 = 1 (non-zero / success)
+        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+    });
+
+    // --- 0x259E00  GS allocator bypass (sub_00259E00) ---
+    //
+    // Called from sub_237640 when vtable[0x9C] returns non-zero (label_2376a0),
+    // with $a0 = result of func_2E8D90(0x510).  Real function does heavy GS buffer
+    // allocation via func_2AE080 (a TODO_NAMED stub) and related init — calling it
+    // risks hitting uninitialised state and hanging.  Bypassed here; func_25A3E0
+    // (below) is also bypassed for the same reason.  func_13FDA0 does not depend
+    // on data set up by this pair and runs correctly without them.
+    runtime.registerFunction(0x259E00u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[BYPASS 259E00] GS allocator bypassed (returns 0)\n");
+            fflush(stdout);
+        }
+        SET_GPR_S32(ctx, 2, 0);        // $v0 = 0 (no allocation handle)
+        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+    });
+
+    // --- 0x25A3E0  GS state-block setup bypass (sub_0025A3E0) ---
+    //
+    // Called from sub_237640 (label_2376c0) with $a0 = result of func_259E00.
+    // Initialises a GS state descriptor block at $a0; if $a0=0 (from bypassed
+    // func_259E00) the writes would target the very start of RDRAM which is
+    // harmless but pointless.  Bypassed for clarity; func_13FDA0 is called next
+    // regardless and does not depend on the state block.
+    runtime.registerFunction(0x25A3E0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[BYPASS 25A3E0] GS state-block setup bypassed (returns 0)\n");
+            fflush(stdout);
+        }
+        SET_GPR_S32(ctx, 2, 0);        // $v0 = 0
+        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+    });
+
+    // --- 0x237640  boot subinit dispatch — diagnostic wrapper ---
+    //
+    // Called from sub_239C40 (boot_subinit) at label_23a100, late in the boot chain:
+    //   sub_239C40 → label_23a100: jal func_237640($a0=READ32(0x382B80), $a1=$sp+0x370)
+    //
+    // Real code flow inside sub_237640:
+    //   1. jal func_237A40($a0=modBase)          — returns 1, no side-effects
+    //   2. JALR vtable[0x9C] via modBase+0x27C   — previously returned 0 (FFF400), now 1 (FFF500)
+    //   3. If non-zero → label_2376a0:
+    //        func_2E8D90(0x510) → func_259E00(rv) → WRITE32(0x443A60,rv) → func_25A3E0(rv)
+    //        → func_13FDA0(modBase, buf)           ← GOAL: render infrastructure init
+    //
+    // This wrapper logs entry/exit plus the func_13FDA0 "initialized" flag at
+    // modBase+0x22C (written to 1 by func_13FDA0's very first instruction).
+    runtime.registerFunction(0x237640u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        const uint32_t modBase = GPR_U32(ctx, 4);
+        const uint32_t buf     = GPR_U32(ctx, 5);
+        printf("[DIAG sub_237640] ENTRY modBase=0x%08X buf=0x%08X\n", modBase, buf);
+        fflush(stdout);
+        sub_00237640_0x237640(rdram, ctx, runtime);
+        const uint32_t initFlag = (modBase != 0u && (modBase + 0x22Cu) < 0x2000000u)
+                                  ? READ32(modBase + 0x22Cu) : 0xDEADu;
+        printf("[DIAG sub_237640] EXIT rv=0x%08X modBase[0x22C](initFlag)=0x%08X rdram[0x443A60]=0x%08X\n",
+               GPR_U32(ctx, 2), initFlag, READ32(0x443A60u));
+        fflush(stdout);
+    });
+
+    // --- 0x13FDA0  render infrastructure init — diagnostic wrapper ---
+    //
+    // Called from sub_237640 (label_2376cc) with ($a0=modBase, $a1=buf).
+    // First action: WRITE32(modBase+0x22C, 1) — "initialized" flag.
+    // Then initialises many module/render slots via repeated func_2E8D90 + func_141300 calls.
+    // This wrapper confirms whether the function is reached and whether it returns normally.
+    runtime.registerFunction(0x13FDA0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        printf("[DIAG sub_13FDA0] ENTRY a0=0x%08X a1=0x%08X\n", GPR_U32(ctx, 4), GPR_U32(ctx, 5));
+        fflush(stdout);
+        sub_0013FDA0_0x13fda0(rdram, ctx, runtime);
+        printf("[DIAG sub_13FDA0] EXIT rv=0x%08X\n", GPR_U32(ctx, 2));
+        fflush(stdout);
+    });
+
     // --- 0x00FFF200  module_keepalive_6 (synthetic) ---
     //
     // The game's module state machine (sub_00308958) reads state[6] from
@@ -1992,12 +2102,25 @@ int main(int argc, char* argv[])
         const bool valid = (stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu);
 
         if (s_iop_init_done.load(std::memory_order_acquire) != 0u) {
-            // IOP init done — advance module 6 to "done" state
+            // IOP init done — advance module 6 to "done" state.
+            //
+            // state[6]=-1 causes sub_00308958 to write 22 to modTable[0] and return 1,
+            // which unblocks the module manager's boot poll.
+            //
+            // NOTE: do NOT write 0x31D200 to rdram[0x384670] here.
+            // sub_0031D200 is the game's 748KB main-logic state machine, but it
+            // requires a valid game-context pointer in $a0 that frameDispatch
+            // normally picks up from the interrupted EE thread context.  Without
+            // that pointer the function reads from address 0 and returns immediately
+            // every frame, stalling game progression.  The per-frame state function
+            // at 0x384670 should only change when the game itself calls setGameState
+            // (0x2FDDF8), which happens once IOP/SIF callbacks fire.  Keep
+            // gs_initState (0x251B10) in place until that happens.
             if (valid) {
-                *(uint32_t*)(rdram + stateTablePtr + 24u) = 0xFFFFFFFFu; // -1 = done
+                *(uint32_t*)(rdram + stateTablePtr + 24u) = 0xFFFFFFFFu; // state[6] = -1 = done
             }
             if (n == 0u) {
-                printf("[modUpdate6] IOP done, wrote state[6]=-1 (module 6 advancing to done)\n");
+                printf("[modUpdate6] IOP done: state[6]=-1 (module 6 advancing to done; 0x384670 unchanged)\n");
                 fflush(stdout);
             }
         } else {
@@ -2083,13 +2206,13 @@ int main(int argc, char* argv[])
         const uint32_t modVTable = 0x44FB00u;
         Ps2FastWrite32(preRdram, 0x382B80u,         modBase);
         Ps2FastWrite32(preRdram, modBase  + 0x27Cu, modVTable);
-        Ps2FastWrite32(preRdram, modVTable + 0x30u, 0x00FFF400u);
-        Ps2FastWrite32(preRdram, modVTable + 0x9Cu, 0x00FFF400u);
-        Ps2FastWrite32(preRdram, modVTable + 0x4Cu, 0x00FFF400u);
+        Ps2FastWrite32(preRdram, modVTable + 0x30u, 0x00FFF400u); // spin-exit sentinel (returns 0)
+        Ps2FastWrite32(preRdram, modVTable + 0x9Cu, 0x00FFF500u); // init-success sentinel (returns 1) → triggers func_13FDA0 path
+        Ps2FastWrite32(preRdram, modVTable + 0x4Cu, 0x00FFF400u); // spin-exit sentinel (returns 0)
         std::cout << "[PreBoot] Module vtable pre-populated: "
                   << "rdram[0x382B80]=0x" << std::hex << modBase
                   << " vtable=0x" << modVTable
-                  << " (+0x30/+0x4C/+0x9C -> 0xFFF400)"
+                  << " (+0x30/+0x4C -> FFF400(ret0), +0x9C -> FFF500(ret1))"
                   << std::dec << std::endl;
     }
 

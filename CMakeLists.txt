@@ -26,7 +26,10 @@ foreach(src ${ALL_GEN_CPPS})
     if(fsize GREATER 2000000)
         get_filename_component(fname ${src} NAME_WLE)
         list(FILTER GENERATED_SOURCES EXCLUDE REGEX "${fname}\\.cpp")
-        if(EXISTS "${CLANG_OBJ_DIR}/${fname}.obj")
+        # sub_0031D200_0x31d200 is replaced by the master dispatcher + chunks system
+        if("${fname}" STREQUAL "sub_0031D200_0x31d200")
+            message(STATUS "sub_0031D200 handled via master dispatcher + chunk .obj files")
+        elseif(EXISTS "${CLANG_OBJ_DIR}/${fname}.obj")
             list(APPEND CLANG_OBJS "${CLANG_OBJ_DIR}/${fname}.obj")
         else()
             set(NEED_STUBS TRUE)
@@ -34,6 +37,28 @@ foreach(src ${ALL_GEN_CPPS})
         endif()
     endif()
 endforeach()
+
+# Pick up all pre-compiled sub_0031D200 chunk .obj files (compiled with clang-cl
+# from src/generated_chunks/ by build_chunks.bat)
+file(GLOB D200_CHUNK_OBJS "${CLANG_OBJ_DIR}/sub_0031D200_chunk_*.obj")
+if(D200_CHUNK_OBJS)
+    list(APPEND CLANG_OBJS ${D200_CHUNK_OBJS})
+    message(STATUS "Linking ${CMAKE_MATCH_1} sub_0031D200 chunk .obj files")
+else()
+    message(STATUS "sub_0031D200 chunks not yet compiled — run src/generated_chunks/build_chunks.bat")
+endif()
+
+# Master dispatcher for sub_0031D200 (small file, compiled by MSVC)
+# Only include if chunk .obj files are available — the dispatcher calls chunk
+# functions that don't exist until clang-cl has compiled them.  Without .obj
+# files we fall back to the interpreter stub in large_function_stubs.cpp.
+set(CHUNK_MASTER "${CMAKE_CURRENT_SOURCE_DIR}/src/generated_chunks/sub_0031D200_0x31d200.cpp")
+if(EXISTS "${CHUNK_MASTER}" AND D200_CHUNK_OBJS)
+    list(APPEND GENERATED_SOURCES "${CHUNK_MASTER}")
+    message(STATUS "Including sub_0031D200 master dispatcher (${list_length D200_CHUNK_OBJS} chunk .obj files)")
+else()
+    message(STATUS "sub_0031D200 chunks not yet compiled -- interpreter stub active (run build_chunks_parallel.py)")
+endif()
 
 # Our game executable
 add_executable(racer_revenge
@@ -54,6 +79,7 @@ target_sources(racer_revenge PRIVATE src/large_function_stubs.cpp)
 target_include_directories(racer_revenge PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/PS2Recomp/ps2xRuntime/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/generated
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/generated_chunks
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

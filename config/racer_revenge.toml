@@ -452,7 +452,7 @@ skip = [
   "sub_00316B40",
   "sub_00317860",
   "sub_00318880",
-  "sub_0031D200",
+  # sub_0031D200 removed from skip — will be compiled with clang-cl
 ]
 
 # Detected MMIO accesses
@@ -3379,6 +3379,8 @@ address = "0x2FDDF8"  # setGameState — interior label inside sub_002FDCE8
 address = "0x2F69D0"  # Thread 2 RPC handler entry inside sub_002F68F8
 [[extra_entry_points]]
 address = "0x2E921C"  # jalr return address in callback dispatch loop at entry_2e91f0
+[[extra_entry_points]]
+address = "0x31D280"  # Game logic start — interior label inside sub_0031D200 (game state machine body)
 [[extra_entry_points]]
 address = "0x251B10"  # GS init render function — interior label inside sub_00251A20
 [[extra_entry_points]]

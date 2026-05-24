@@ -36,6 +36,55 @@ This file is the substitute for asking Steve questions. Every decision that woul
 
 <!-- ENTRIES BELOW THIS LINE — NEWEST FIRST -->
 
+## [2026-05-24 09:30] SESSION START — cycle 27
+
+**Type:** session-marker
+**Cycle:** 27
+
+Resume from cycle 26 (commit 95d6a19). Inventory:
+- Build: green (verified `cmake --build build --target racer_revenge` succeeded).
+- Runtime: stable plateau. 12s headless smoke shows `state=0x251b10` (gs_initState
+  installed), `state6=0xffffffff` (module 6 done), per-frame `sif_dmaSend` ASCII
+  log channel ticking, `capA/capB=0`, main thread parked at `pc=0x1000ac`.
+- Uncommitted: substantial cycle-27-in-progress work in main.cpp + supporting
+  changes. The diagnostic wrappers + bypasses build and run cleanly; the
+  `sub_0031D200` chunking experiment in `src/generated_chunks/` is incomplete
+  (only chunk_0010 produced a real .obj; chunk_0000 is 24MB and won't compile).
+  CMake guards chunk linking on `EXISTS chunk_*.obj` so the build degrades
+  gracefully to the MIPS interpreter stub when chunks are missing.
+
+## [2026-05-24 09:31] cycle 27 plan — commit working overrides, then trace 0x302DF0
+
+**Type:** plan
+**Cycle:** 27
+
+1. Add `src/generated_chunks/`, `src/clang_objs/`, and `logs/` to .gitignore
+   (2.8GB of chunks must never enter the repo).
+2. Commit the uncommitted cycle-27 work as one cohesive change:
+   - `2E8D90` returns 0 (not 1) — was breaking sub_1416C0 linked-list walk.
+   - `FFF500` sentinel returning 1, installed at modVTable+0x9C, to unblock
+     sub_237640's `bnez` into the func_13FDA0 path.
+   - Diagnostic wrappers around `237640` and `13FDA0` to observe whether
+     the render-infra init path actually fires post-vtable change.
+   - Bypasses for `259E00` / `25A3E0` (GS allocator + state-block setup —
+     both depend on TODO_NAMED stubs that would hang).
+   - `FFF200` hook: removed stale code that would have rewritten 0x384670
+     with sub_0031D200's address — that broke frameDispatch because
+     0x31D200 needs a game-context $a0 the dispatcher doesn't supply.
+   - Interpreter fallback for sub_0031D200 + chunk-build CMake scaffold
+     (currently inactive: no chunk .objs).
+3. Add a hook on `sub_002E90F0` (calls moduleManager_mainLoop 0x302DF0) to
+   confirm whether the module-manager main loop ever runs. PCSample shows
+   the EE main thread parked at 0x1000ac — if 0x302DF0 never runs, modules
+   never advance and game state never progresses beyond initial gs_initState.
+
+Evidence to capture: headless smoke output with `[trace 2E90F0]` lines (or
+their absence).
+
+Rollback: the diag hook is one-shot, fully reversible. The committed work
+is the same code currently in the working tree, which has already been
+runtime-verified stable.
+
 ## [2026-05-21 20:50] SESSION START
 
 **Type:** session-marker

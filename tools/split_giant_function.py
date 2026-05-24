@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""
+split_giant_function.py — Splits the 2.1GB sub_0031D200 C++ file into N chunks.
+
+Strategy:
+  * Labels are split into N groups by file-order position.
+  * Each chunk gets a switch table covering ALL its labels (not just resumable
+    entry points) so that cross-chunk goto calls can dispatch correctly.
+  * Cross-chunk gotos are rewritten as:
+      ctx->pc = 0xADDR; sub_0031D200_chunk_XXXX(rdram, ctx, runtime); return;
+  * The master dispatcher uses the EXACT original switch-table PCs to call the
+    right chunk (exact PC -> chunk, no overlapping address ranges).
+
+Usage:
+    python split_giant_function.py [--chunks N] [--input FILE] [--outdir DIR]
+"""
+
+import re
+import os
+import sys
+import argparse
+from collections import defaultdict
+
+# ---- Config ---------------------------------------------------------------
+DEFAULT_INPUT  = r"C:\Programming\GitHub\Star-Wars-Racer-Revenge-recomp\src\generated\sub_0031D200_0x31d200.cpp"
+DEFAULT_OUTDIR = r"C:\Programming\GitHub\Star-Wars-Racer-Revenge-recomp\src\generated_chunks"
+DEFAULT_CHUNKS = 120
+
+HEADER = """\
+#include "ps2_runtime_macros.h"
+#include "ps2_runtime.h"
+#include "ps2_recompiled_functions.h"
+#include "ps2_recompiled_stubs.h"
+#include "ps2_syscalls.h"
+#include "ps2_stubs.h"
+#include "sub_0031D200_chunks.h"
+#ifdef PS2_FUNCTION_LOG_TRACKER
+#include "ps2_log.h"
+#endif
+"""
+
+LABEL_DEF_RE  = re.compile(r'^label_([0-9a-fA-F]+):')
+LABEL_GOTO_RE = re.compile(r'\bgoto label_([0-9a-fA-F]+);')
+SWITCH_CASE_RE = re.compile(r'^\s+case 0x([0-9a-fA-F]+)u: goto label_([0-9a-fA-F]+);')
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--chunks",  type=int, default=DEFAULT_CHUNKS)
+    p.add_argument("--input",   default=DEFAULT_INPUT)
+    p.add_argument("--outdir",  default=DEFAULT_OUTDIR)
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+    os.makedirs(args.outdir, exist_ok=True)
+
+    print(f"[split] Input : {args.input}")
+    print(f"[split] Output: {args.outdir}")
+    print(f"[split] Chunks: {args.chunks}")
+
+    # ------------------------------------------------------------------
+    # Pass 1: collect all label definitions and original switch-table cases
+    # ------------------------------------------------------------------
+    print("[split] Pass 1: scanning labels and switch table ...", flush=True)
+
+    label_order  = []          # list of hex strings in file order
+    switch_cases = {}          # original switch: pc_hex -> lbl_hex
+    switch_end_line = None
+
+    with open(args.input, "r", encoding="utf-8", errors="replace") as f:
+        in_switch = False
+        for lineno, line in enumerate(f, 1):
+            stripped = line.strip()
+
+            if not in_switch and "switch (ctx->pc)" in line:
+                in_switch = True
+                continue
+
+            if in_switch:
+                m = SWITCH_CASE_RE.match(line)
+                if m:
+                    switch_cases[m.group(1).lower()] = m.group(2).lower()
+                elif "default: break;" in line and switch_end_line is None:
+                    switch_end_line = lineno
+                    in_switch = False
+                continue
+
+            # Only collect label definitions AFTER the switch
+            if switch_end_line is not None:
+                if line and line[0] not in (' ', '\t', '\r', '\n', '}'):
+                    m = LABEL_DEF_RE.match(stripped)
+                    if m:
+                        label_order.append(m.group(1).lower())
+
+    n_labels = len(label_order)
+    print(f"[split] Found {n_labels} labels, {len(switch_cases)} switch cases, switch ends at line {switch_end_line}")
+
+    # ------------------------------------------------------------------
+    # Assign labels to chunks
+    # ------------------------------------------------------------------
+    n_chunks = args.chunks
+    chunk_size = max(1, (n_labels + n_chunks - 1) // n_chunks)
+
+    label_to_chunk = {}
+    label_to_addr  = {}
+    for idx, lbl in enumerate(label_order):
+        chunk_id = idx // chunk_size
+        label_to_chunk[lbl] = chunk_id
+        label_to_addr[lbl]  = int(lbl, 16)
+
+    actual_chunks = max(label_to_chunk.values()) + 1 if label_to_chunk else 0
+    print(f"[split] Assigning {n_labels} labels -> {actual_chunks} chunks (target {n_chunks})")
+
+    # Group ALL labels by chunk (for the chunk's switch table)
+    chunk_labels = defaultdict(list)   # chunk_id -> [lbl_hex, ...]
+    for lbl, chunk_id in label_to_chunk.items():
+        chunk_labels[chunk_id].append(lbl)
+
+    # ------------------------------------------------------------------
+    # Write chunk files (header + full switch table, code written in pass 2)
+    # ------------------------------------------------------------------
+    chunk_files = []
+    for c in range(actual_chunks):
+        path = os.path.join(args.outdir, f"sub_0031D200_chunk_{c:04d}.cpp")
+        fh = open(path, "w", encoding="utf-8")
+        chunk_files.append(fh)
+        fh.write(f"// Auto-split chunk {c} of sub_0031D200\n")
+        fh.write(HEADER + "\n")
+        fh.write(f"void sub_0031D200_chunk_{c:04d}(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {{\n")
+        # Write switch table for ALL labels in this chunk
+        cases = sorted(chunk_labels[c], key=lambda x: int(x, 16))
+        if cases:
+            fh.write("    switch (ctx->pc) {\n")
+            for lbl_hex in cases:
+                fh.write(f"        case 0x{lbl_hex}u: goto label_{lbl_hex};\n")
+            fh.write("        default: break;\n")
+            fh.write("    }\n\n")
+        fh.write("    return; // unreachable fall-through\n\n")
+
+    print("[split] Pass 2: streaming and rewriting gotos ...", flush=True)
+
+    # ------------------------------------------------------------------
+    # Pass 2: stream code blocks to correct chunk files, rewrite cross-chunk gotos
+    # ------------------------------------------------------------------
+    current_label_chunk = 0
+    lines_written = 0
+    PROGRESS_INTERVAL = 2_000_000
+
+    def rewrite_goto(line, current_label_chunk):
+        m = LABEL_GOTO_RE.search(line)
+        if not m:
+            return line
+        target = m.group(1).lower()
+        if target not in label_to_chunk:
+            return line
+        target_chunk = label_to_chunk[target]
+        if target_chunk == current_label_chunk:
+            return line
+
+        # Cross-chunk: replace goto with chunk call + return
+        target_addr = label_to_addr[target]
+        indent = len(line) - len(line.lstrip())
+        indent_str = line[:indent]
+        return (
+            f"{indent_str}ctx->pc = 0x{target_addr:x}u;\n"
+            f"{indent_str}sub_0031D200_chunk_{target_chunk:04d}(rdram, ctx, runtime); return;\n"
+        )
+
+    with open(args.input, "r", encoding="utf-8", errors="replace") as f:
+        labels_seen = 0
+
+        for lineno, line in enumerate(f, 1):
+            if lineno <= switch_end_line + 4:
+                continue
+
+            # Non-indented line: either a label definition or closing brace
+            if line and line[0] not in (' ', '\t', '\r', '\n'):
+                stripped = line.strip()
+                m = LABEL_DEF_RE.match(stripped)
+                if m:
+                    lbl = m.group(1).lower()
+                    if lbl in label_to_chunk:
+                        current_label_chunk = label_to_chunk[lbl]
+                    chunk_files[current_label_chunk].write(line)
+                    lines_written += 1
+                    labels_seen += 1
+                # else: closing brace or other non-indented line — skip
+                continue
+
+            # Indented code line
+            rewritten = rewrite_goto(line, current_label_chunk)
+            chunk_files[current_label_chunk].write(rewritten)
+            lines_written += 1
+
+            if lines_written % PROGRESS_INTERVAL == 0:
+                print(f"[split]   ... {lines_written:,} lines, {labels_seen}/{n_labels} labels", flush=True)
+
+    # Close chunks with closing brace
+    for fh in chunk_files:
+        fh.write("}\n")
+        fh.close()
+
+    print(f"[split] Wrote {lines_written:,} code lines to {actual_chunks} chunk files")
+
+    # ------------------------------------------------------------------
+    # Generate header with all chunk forward declarations
+    # ------------------------------------------------------------------
+    header_path = os.path.join(args.outdir, "sub_0031D200_chunks.h")
+    with open(header_path, "w", encoding="utf-8") as hf:
+        hf.write("#pragma once\n")
+        hf.write('#include "ps2_runtime.h"\n\n')
+        hf.write("// Forward declarations for all sub_0031D200 chunks\n")
+        for c in range(actual_chunks):
+            hf.write(f"void sub_0031D200_chunk_{c:04d}(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime);\n")
+        hf.write("\n")
+    print(f"[split] Wrote header: {header_path}")
+
+    # ------------------------------------------------------------------
+    # Build exact-PC dispatch table for the master entry function.
+    # For each original switch-case (pc -> lbl), find the chunk.
+    # Also find the chunk for the function's initial entry (label at function start).
+    # ------------------------------------------------------------------
+    # Initial entry: the function is called with ctx->pc=0x31d200 (its address)
+    # label_31d200 should be in label_to_chunk
+    initial_label = label_order[0] if label_order else None  # first label in file
+    initial_chunk = label_to_chunk.get(initial_label, 0)
+
+    # Build master switch: pc -> chunk
+    master_dispatch = {}  # pc_hex -> chunk_id
+    for pc_hex, lbl_hex in switch_cases.items():
+        if lbl_hex in label_to_chunk:
+            master_dispatch[pc_hex] = label_to_chunk[lbl_hex]
+    # Also add the function's own start address as an entry
+    if initial_label:
+        master_dispatch["31d200"] = initial_chunk
+
+    master_path = os.path.join(args.outdir, "sub_0031D200_0x31d200.cpp")
+    with open(master_path, "w", encoding="utf-8") as mf:
+        mf.write("// Master entry for sub_0031D200 -- dispatches to split chunks\n")
+        mf.write(HEADER + "\n")
+        mf.write("void sub_0031D200_0x31d200(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {\n")
+        mf.write("#ifdef PS2_FUNCTION_LOG_TRACKER\n")
+        mf.write('    PS_LOG_ENTRY("sub_0031D200_0x31d200");\n')
+        mf.write("#endif\n")
+        mf.write("    if (ctx->pc == 0u) ctx->pc = 0x31d200u;\n")
+        mf.write("    switch (ctx->pc) {\n")
+        for pc_hex in sorted(master_dispatch, key=lambda x: int(x, 16)):
+            c = master_dispatch[pc_hex]
+            mf.write(f"        case 0x{pc_hex}u: sub_0031D200_chunk_{c:04d}(rdram, ctx, runtime); return;\n")
+        mf.write("        default: break;\n")
+        mf.write("    }\n")
+        mf.write("    // Unknown pc -- return via $ra\n")
+        mf.write("    ctx->pc = ctx->gpr[31];\n")
+        mf.write("}\n")
+    print(f"[split] Wrote master: {master_path}")
+
+    # ------------------------------------------------------------------
+    # Generate build_chunks.bat
+    # ------------------------------------------------------------------
+    bat_path = os.path.join(args.outdir, "build_chunks.bat")
+    project_root = r"C:\Programming\GitHub\Star-Wars-Racer-Revenge-recomp"
+    incdir1 = rf"{project_root}\tools\PS2Recomp\ps2xRuntime\include"
+    incdir2 = rf"{project_root}\src\generated"
+    incdir3 = rf"{project_root}\include"
+    incdir4 = rf"{project_root}\build\_deps\raylib-src\src"
+    incdir5 = rf"{project_root}\build\_deps\raylib-src\src\external\glfw\include"
+    outdir_obj = rf"{project_root}\src\clang_objs"
+
+    with open(bat_path, "w", encoding="utf-8") as bf:
+        bf.write("@echo off\n")
+        bf.write("setlocal enabledelayedexpansion\n\n")
+        bf.write(r'call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1' + "\n")
+        bf.write(r'set PATH=C:\Program Files\LLVM\bin;%PATH%' + "\n\n")
+        bf.write(f'set SRCDIR={args.outdir}\n')
+        bf.write(f'set OUTDIR={outdir_obj}\n')
+        bf.write(f'set INC1={incdir1}\n')
+        bf.write(f'set INC2={incdir2}\n')
+        bf.write(f'set INC3={incdir3}\n')
+        bf.write(f'set INC4={incdir4}\n')
+        bf.write(f'set INC5={incdir5}\n')
+        bf.write(f'set INCCHUNKS={args.outdir}\n\n')
+        bf.write('if not exist "%OUTDIR%" mkdir "%OUTDIR%"\n\n')
+        bf.write("echo Compiling sub_0031D200 chunks with clang-cl...\n")
+        bf.write("set FAILED=0\n\n")
+        bf.write('set CLANGFLAGS=/c /Od /bigobj /std:c++20 /EHsc /MD\n')
+        bf.write('set INCLUDES=-I"%INC1%" -I"%INC2%" -I"%INC3%" -I"%INC4%" -I"%INC5%" -I"%INCCHUNKS%"\n\n')
+        bf.write("echo   Compiling master dispatcher...\n")
+        bf.write(f'clang-cl %CLANGFLAGS% %INCLUDES% -Fo"%OUTDIR%\\sub_0031D200_0x31d200.obj" "%SRCDIR%\\sub_0031D200_0x31d200.cpp"\n')
+        bf.write("if errorlevel 1 (echo   FAILED: master & set FAILED=1)\n\n")
+        bf.write("echo   Compiling chunk files...\n")
+        for c in range(actual_chunks):
+            fname = f"sub_0031D200_chunk_{c:04d}"
+            bf.write(f'clang-cl %CLANGFLAGS% %INCLUDES% -Fo"%OUTDIR%\\{fname}.obj" "%SRCDIR%\\{fname}.cpp"\n')
+            bf.write(f"if errorlevel 1 (echo   FAILED: {fname} & set FAILED=1)\n")
+        bf.write("\nif %FAILED%==1 (echo. & echo === SOME CHUNKS FAILED ===) else (echo. & echo All chunks compiled OK.)\n")
+    print(f"[split] Wrote batch: {bat_path}")
+    print("[split] Done.")
+
+
+if __name__ == "__main__":
+    main()
