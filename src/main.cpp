@@ -1999,6 +1999,38 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
 
+    // --- callback[18] @ 0x3CA9F0 — TYPE-B "prepender" (tail-jump j 0x2E91C0) ---
+    //
+    // Short tail-jump callback:
+    //   $a0 = 0x443190                      ; data ptr (struct addr)
+    //   $a1 = 0x282280                      ; fn ptr (sub_00282280 — registered)
+    //   $a2 = 0x443180                      ; node addr (3-word node struct)
+    //   WRITE32(0x443190, 0)                ; zero first word of data struct
+    //   j sub_002E91C0                      ; tail-jump to list prepend
+    //   delay: WRITE32(0x443194, 0)         ; zero second word of data struct
+    //
+    // After prepend the linked list at 0x446AD0 has a real node with
+    // fn=0x282280, data=0x443190.  When listWalker pops it, it calls
+    // sub_00282280(0x443190, -1) — the actual subsystem init function.
+    runtime.registerFunction(0x3CA9F0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        // Zero the data struct (first 8 bytes)
+        *(uint32_t*)(rdram + 0x443190u) = 0u;
+        *(uint32_t*)(rdram + 0x443194u) = 0u;
+        // Prepend node {next, fn, data} at 0x443180
+        const uint32_t oldHead = *(uint32_t*)(rdram + 0x446AD0u);
+        *(uint32_t*)(rdram + 0x443180u + 0u) = oldHead;
+        *(uint32_t*)(rdram + 0x443180u + 4u) = 0x00282280u;
+        *(uint32_t*)(rdram + 0x443180u + 8u) = 0x00443190u;
+        *(uint32_t*)(rdram + 0x446AD0u) = 0x443180u;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[18] 0x3CA9F0] prepended node at 0x443180 fn=0x282280 data=0x443190\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- Boot-callback hand-translations (cycle 28 phase 2-3) ---
     //
     // The 66-entry boot-init callback array at 0x3CC548..0x3CC650 dispatches
@@ -2571,8 +2603,10 @@ int main(int argc, char* argv[])
         // overwrites, so without this skip the synthPrepend bulk loop
         // would clobber our specific overrides for type-A callbacks.
         //
-        // Type-A callback PCs (must match kTypeA[] in the typeABulk block):
+        // Type-A callback PCs (must match kTypeA[] in the typeABulk block)
+        // plus prepender overrides (callback[18] @ 0x3CA9F0):
         static const uint32_t kSkipPcs[] = {
+            0x003CA9F0u, // [18] prepender
             0x003CA020u, 0x003CA0A0u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
             0x003CA390u, 0x003CA410u, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
             0x003CA970u, 0x003CAA20u, 0x003CAAA0u, 0x003CAB20u, 0x003CABA0u,

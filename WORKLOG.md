@@ -205,7 +205,45 @@ Remaining work for boot-init completeness:
 - Verify whether the populated matrices at rdram[0x442xxx-0x446xxx]
   actually feed any downstream subsystem (TBD via further tracing)
 
-## [2026-05-24 13:05] SESSION PAUSE — cycle 28 end (4 phases, 4 commits)
+## [2026-05-24 13:25] Cycle 28 phase 5 — callback[18] hand-translated, walker invokes real sub_282280
+
+**Type:** milestone
+**Cycle:** 28
+
+Decoded callback[18] at 0x3CA9F0 (12-instruction tail-jump):
+  Allocates a 3-word linked-list node at 0x443180 with
+  next=oldHead, fn=0x282280, data=0x443190.  Zeroes the first 8 bytes
+  of the data struct at 0x443190.  Tail-jumps `j sub_002E91C0`.
+
+Hand-translated as a registered override that does the prepend in C++.
+synthPrepend's skip set now includes 0x3CA9F0.
+
+Smoke result (`logs/cb18_out.txt`):
+- `[callback[18] 0x3CA9F0] prepended node at 0x443180 fn=0x282280 data=0x443190`
+- listWalker depth: 15 (14 synth + 1 real cb[18] node)
+- Walker logged 14 FFF600 pops (all synthetic data=cb_pc), and ONE
+  silent pop — the real cb[18] node calling sub_00282280(0x443190, -1).
+- sub_00282280 is registered, real recompiled code.  It ran to
+  completion without crashes (zero new recover-pc events in stderr).
+- Plateau still unchanged at the visible runtime level
+  (state=0x251B10, capA/capB=0).
+
+**This is the first time real subsystem-init code from the boot
+callback chain has executed in this recompilation.**  sub_00282280
+(at VA 0x282280) was previously dead code — never called from anywhere
+the runtime could reach.  Now the boot chain naturally invokes it.
+
+Additional discovery during phase 5 work:
+- Pattern-scan refined: 6 prependers (call sub_002E91C0) — [11], [12],
+  [18], [30], [31], [34].  Only 2 of these are simple tail-jumps
+  ([18], [34]); the other 4 have non-trivial setup including calls to
+  intermediate helpers (0x299130, 0x24CF80, 0x24A8E0).
+- 7 other-callers (call non-prepend functions): [0], [3], [7], [10],
+  [13], [38], [62] — currently treated as type-A (matrix-write only;
+  their function calls are missed).  Translating each to call the
+  intended helper requires per-callback decode.
+
+## [2026-05-24 13:30] SESSION PAUSE — cycle 28 end (5 phases, 5 commits)
 
 ## [2026-05-24 09:30] SESSION START — cycle 27
 
