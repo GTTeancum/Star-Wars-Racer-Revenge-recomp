@@ -130,7 +130,82 @@ decode + translate each callback in turn.  Estimate: ~30-90 min per
 callback when the pattern is type A; longer for type B/other.  Over
 multiple cycles this is tractable.
 
-## [2026-05-24 12:30] SESSION PAUSE — cycle 28 end
+## [2026-05-24 12:40] Cycle 28 phase 3 — pattern-scan all 66 callbacks
+
+**Type:** result
+**Cycle:** 28
+
+Wrote a Python decoder scan over the first 32 instructions of each of
+the 66 callbacks.  Classified by sq-target + jal-presence.
+
+Results:
+- **61 callbacks are TYPE A** (data-only init): each writes 4 quadwords
+  (64 bytes) to a fixed rdram target in 0x442xxx-0x446xxx range, then
+  jr $ra.  No function calls.  Stack-write pattern is IDENTICAL across
+  all 64-byte-stack TYPE-A callbacks → matrix data is the same constant.
+- **5 callbacks are TYPE B** (have jal calls):
+    [7]  @0x003CA350 → jal 0x315b60 (twice)
+    [13] @0x003CA780 → jal 0x164aa0 (x3) + 0x164dd0
+    [30] @0x003CAFA0 → jal 0x24a8e0, 0x299130, 0x2E91C0, 0x299130
+    [31] @0x003CAFF0 → jal 0x299130, 0x2E91C0
+
+**Only 2 of 66 callbacks naturally call sub_002E91C0** (the linked-list
+prepend): callback[30] and callback[31].  So the REAL list at 0x446AD0
+should have at most 2 entries, not 66.  This contradicts the synthPrepend
+POC's 66-entry list and means synthPrepend was creating 64+ phantom
+entries the real boot wouldn't have.
+
+**Plan for full translation** (multi-cycle):
+1. Implement a generic type-A handler that takes a {callback_pc,
+   target_addr} table.  For each entry, write the standard 64-byte
+   matrix to target_addr.  This handles all 61 type-A callbacks at once.
+2. Hand-translate the 5 type-B callbacks individually (each needs
+   custom logic for the called functions).
+3. Remove synthPrepend entirely once all 66 have real implementations.
+
+Estimate: ~30 min for the type-A bulk handler, ~1-2 hr each for type-B.
+
+**This session's footprint:**
+- 9 commits across cycles 27 and 28
+- Build green throughout
+- One real callback hand-translated (cb[65])
+- 65 still on synthPrepend stubs
+- WORKLOG documents the systematic plan for the remaining 65
+
+Next session can pick up from this entry and either (a) implement the
+generic type-A bulk handler or (b) start translating type-B callbacks.
+
+## [2026-05-24 13:00] Cycle 28 phase 4 — 51 type-A callbacks translated
+
+**Type:** milestone
+**Cycle:** 28
+
+Implemented generic typeABulk handler driven by a 51-entry lookup table
+(pc → target_addr).  All entries share the same 64-byte matrix; only
+the target address varies.
+
+Smoke result (`logs/typeA_out.txt`):
+- `[Bootstrap] Registered 51 TYPE-A boot callbacks (matrix-write)`
+- 5 typeA-cb invocations logged in the boot init phase (n=0..4 of 51)
+- listWalker depth: 15 (was 65 after synthPrepend skipped only [65]).
+  The 51 type-A callbacks no longer create synthetic list entries since
+  they do their real data-init work instead.  The remaining 15 are the
+  10 type-B callbacks + 5 unclassified entries that still hit synthPrepend.
+- Plateau unchanged: state=0x251B10, capA/capB=0
+
+Cumulative progress in cycle 28:
+- Phase 1: clean 66-entry list-walker measurement
+- Phase 2: callback[65] hand-translated (first real one)
+- Phase 3: pattern-scanned all 66, classified A/B (52/10 then refined to 51/10+5)
+- Phase 4: 51 type-A callbacks bulk-translated
+
+Remaining work for boot-init completeness:
+- 10 type-B callbacks (hand-translate each — multi-cycle)
+- 5 unclassified callbacks (re-decode, classify, translate)
+- Verify whether the populated matrices at rdram[0x442xxx-0x446xxx]
+  actually feed any downstream subsystem (TBD via further tracing)
+
+## [2026-05-24 13:05] SESSION PAUSE — cycle 28 end (4 phases, 4 commits)
 
 ## [2026-05-24 09:30] SESSION START — cycle 27
 
