@@ -348,7 +348,58 @@ Trace hook left ACTIVE at low cadence (every 600th call).  Future cycles
 that unblock the callback prepends will see depth go from 0 → 66, which
 is the immediate verification signal.
 
-## [2026-05-24 11:15] SESSION PAUSE — cycle 27 end (5 phases, 5 commits)
+## [2026-05-24 11:30] Cycle 27 phase 6 — synthetic-prepend POC: list infra works
+
+**Type:** blocker-resolved
+**Cycle:** 27
+
+Replaced dataSegNoop in 0x3C7B80..0x3CE000 with `synthPrepend`: each call
+prepends a 12-byte node to the linked list at 0x446AD0 with
+fn=0xFFF400 (noop returns 0), data=callback_pc.  Nodes drawn from a
+1024-slot pool at 0x4F0000..0x4F3000 via monotonic counter.
+
+Smoke log: `logs/synth2_out.txt`, `logs/synth2_err.txt`.
+
+**Results:**
+- synthPrepend fired ≥128 times during boot (head address at slot 127).
+- `[TRACE listWalker 0x2EADD0] call#0 head=0x004F05F4 depth=100` — walker
+  now finds a non-empty list, walks ≥100 entries (capped by trace).
+  Previously depth=0.
+- listWalker pops each node, calls (node->fn)(node->data, -1) =
+  0xFFF400(callback_pc, -1) → returns 0.  Done 100+ times cleanly.
+- ZERO new `[dispatch:recover-pc]` / first-bad-pc / Warning events in
+  stderr — the list infrastructure is clean end-to-end.
+- frame=1 already shows state6=0xffffffff (done).  Previously this took
+  until frame=61.  The listWalker doing real work slightly accelerated
+  module init.
+- Per-frame plateau otherwise identical: state=0x251B10 (gs_initState),
+  capA/capB=0 (still no IOP GFX module without CDVD).
+
+**What this proves:**
+1. The boot chain's list-populate/list-consume pipeline is structurally
+   sound when the list is non-empty.
+2. The 12-byte node format `{next, fn, data}` is correctly modeled.
+3. Replacing dataSegNoop with a more capable stub does NOT regress
+   stability (the "deep JAL chain corrupts $ra" failure mode from the
+   interpreter experiment was specific to interpretation, not to
+   list-population).
+
+**What this does NOT prove:**
+The fn=0xFFF400 in our synthetic nodes is a noop.  The real boot
+callbacks would install fn pointers that do actual subsystem init.
+The synthetic test shows the infra works but doesn't progress game
+state, because no real init happens.
+
+**Next direction (high info value, manageable scope):**
+Pick 1-3 boot callbacks from 0x3C9F70..0x3CC3D0, hand-translate them to
+C++ overrides that fill the correct fn/data into a fixed-rdram node and
+prepend it.  Start with callback[0] at 0x3C9F70 — decoded shape is ~90
+instructions, mostly stack writes (struct init) plus the prepend call.
+Output: a working node whose fn points to a real subsystem init routine.
+Verify with the existing listWalker trace (specific depth=N instead of
+=128) and observe whether the called fn does anything we can see.
+
+## [2026-05-24 11:35] SESSION PAUSE — cycle 27 end (6 phases, 6 commits)
 
 **Type:** session-marker
 **Cycle:** 27

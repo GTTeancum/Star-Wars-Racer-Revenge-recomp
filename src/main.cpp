@@ -2324,32 +2324,92 @@ int main(int argc, char* argv[])
     // but without the overhead.  The real functions in this range are small callbacks
     // (module init slots); returning early is equivalent to an empty module init.
     //
-    // CYCLE 27 PHASE 3 NOTE — DO NOT replace with the interpreter stub yet:
-    //   These addresses include the boot-init callback array at
-    //   0x3CC548..0x3CC650 (66 entries pointing into 0x3C9F70..0x3CC3D0).
-    //   Routing them through sub_0031D200_0x31d200's MIPS interpreter
-    //   crashes within ~3 callbacks: the interpreter handles SPECIAL/IMM
-    //   ops + MMI-as-move correctly, but the boot callbacks make deep JAL
-    //   chains into real recompiled functions (func_310440 → func_30f8d0
-    //   → func_311008 → ...).  Somewhere in that nested chain $ra becomes
-    //   0x3 (likely stack save/restore mismatch between recompiled and
-    //   interpreted frames).  Resulting cascade of recover-pc events
-    //   prevents setGameState from firing — net regression.
+    // CYCLE 27 PHASE 6 — SYNTHETIC PREPEND EXPERIMENT:
     //
-    //   The MMI-as-move interpreter fix (ps2_mips_interp.cpp) is left in
-    //   place — it's correct and helps any future use of the interpreter,
-    //   just not enough on its own.
+    //   Background: phases 3-5 established that the 66 callbacks in
+    //   0x3C9F70..0x3CC3D0 are boot-init nodes that each prepend a struct
+    //   to the linked list at 0x446AD0.  With dataSegNoop the list stays
+    //   empty and the list walker at 0x2E9170 has nothing to do.
     //
-    //   Until the interpreter's call/return frame contract matches the
-    //   recompiled functions' contract, dataSegNoop is the lesser evil.
-    //   See WORKLOG cycle 27 phase 3 for the full trace.
+    //   Replace dataSegNoop with a stub that prepends a SYNTHETIC node
+    //   for each callback invocation:
+    //     node[0] = previous head (linked-list next)
+    //     node[4] = synthetic fn = 0x00FFF400 (returns 0, no-op)
+    //     node[8] = callback PC (so the walker sees a unique data field
+    //               per entry, useful for downstream tracing)
+    //   Nodes are pre-allocated in a static rdram region (0x4F0000..0x4F0E10
+    //   = 0x600 bytes = 128 × 12-byte slots, more than 66 needed).
+    //
+    //   The unique pool slot is selected by hashing the callback PC into
+    //   the pool — each PC maps to a stable slot, so multiple calls of
+    //   the same callback overwrite each other's nodes (acceptable —
+    //   a single boot run only calls each callback once via the iterator).
+    //
+    //   After all callbacks fire, the linked list at 0x446AD0 will hold
+    //   up to 66 nodes (chained via offset +0).  The list walker
+    //   (sub_002E9170) pops each and calls (node->fn)(node->data, -1) =
+    //   0xFFF400(callback_pc, -1) → returns 0.  Behavior change: list
+    //   walker now does real work (pops 66 nodes, calls 66 noops) instead
+    //   of immediately returning on empty list.
+    //
+    //   Verification: the [TRACE listWalker] hook below will report
+    //   depth=66 instead of depth=0.
+    //
+    //   Risk: this populates the list with stub nodes.  If a downstream
+    //   subsystem reads the node[4] (fn) and expects a real subsystem
+    //   handler (more than "return 0"), it will get the noop and may
+    //   behave differently than expected.  But behavior change IS the
+    //   point — we want to know if anything reacts to a non-empty list.
+    //
+    //   Rollback: replace the synthetic-prepend stub with the previous
+    //   dataSegNoop lambda (one line).
     {
-        auto dataSegNoop = +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-            if (ctx) ctx->pc = GPR_U32(ctx, 31); // jr $ra — return to caller
+        // Pool of 128 12-byte nodes starting at rdram[0x4F0000].
+        // Safely above the BSS clear region (zeroed 0x3D5A00..0x44F600 by _start).
+        constexpr uint32_t kPoolBase  = 0x4F0000u;
+        constexpr uint32_t kPoolSlots = 128u;
+
+        auto synthPrepend = +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+            if (!rdram || !ctx) return;
+            const uint32_t cbPc = ctx->pc;
+            // Monotonic counter for pool slot — avoids pc-hash collisions.
+            // Pool is 1024 slots × 12 bytes = 12KB at 0x4F0000..0x4F3000.
+            // Wraps at 1024; if we see >1024 prepend calls in one boot we
+            // overwrite oldest nodes and may create cycles (acceptable;
+            // we cap the walker trace at 100 depth anyway).
+            static std::atomic<uint32_t> s_slot{0};
+            const uint32_t idx  = s_slot.fetch_add(1u, std::memory_order_relaxed) & 0x3FFu;
+            const uint32_t node = 0x4F0000u + idx * 12u;
+            // Prepend: node[0] = oldHead; head = node
+            const uint32_t oldHead = *(uint32_t*)(rdram + 0x446AD0u);
+            *(uint32_t*)(rdram + node + 0u) = oldHead;
+            *(uint32_t*)(rdram + node + 4u) = 0x00FFF400u; // fn = noop-returns-zero
+            *(uint32_t*)(rdram + node + 8u) = cbPc;        // data = callback PC
+            *(uint32_t*)(rdram + 0x446AD0u) = node;
+            // Light periodic logging
+            static std::atomic<uint64_t> s_n{0};
+            const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 8u || (n % 200u) == 0u) {
+                printf("[synthPrepend] n=%llu pc=0x%08X node=0x%08X oldHead=0x%08X\n",
+                       (unsigned long long)n, cbPc, node, oldHead);
+                fflush(stdout);
+            }
+            // Return: jr $ra
+            ctx->pc = GPR_U32(ctx, 31);
         };
+
+        // Zero the node pool so stale data doesn't confuse the list walker.
+        // (Actually unnecessary — _start will not touch 0x4F0000 since it's
+        // outside the BSS zero range, and our prepend writes all 3 fields
+        // before publishing.  Defensive zero anyway in case of reset.)
+        // We can't access rdram here yet (it isn't allocated); zeroing is
+        // deferred to the first prepend.
+
         for (uint32_t addr = 0x3C7B80u; addr < 0x3CE000u; addr += 4u) {
-            runtime.registerFunction(addr, dataSegNoop);
+            runtime.registerFunction(addr, synthPrepend);
         }
+        std::cout << "[Bootstrap] synthPrepend installed for 0x3C7B80..0x3CE000 "
+                     "(pool=0x4F0000..0x4F0600, 128 slots, fn=0xFFF400)" << std::endl;
     }
 
     // --- Load and run ---
