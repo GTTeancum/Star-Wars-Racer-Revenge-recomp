@@ -319,7 +319,36 @@ against its list consumer).
 Next cycle should pick exactly one of (1)/(2)/(3)/(4) with full context
 from this WORKLOG entry.
 
-## [2026-05-24 11:00] SESSION PAUSE — cycle 27 end
+## [2026-05-24 11:10] Cycle 27 phase 5 — confirm empty-list hypothesis via runtime trace
+
+**Type:** result
+**Cycle:** 27
+
+Added trace on `sub_002EADD0` (the wrapper that tail-jumps into the
+linked-list walker at 0x2E9170).  Reads the head pointer at 0x446AD0
+and walks the chain to measure depth.
+
+Smoke log: `logs/lw_out.txt`.
+
+Result on first call (n=0): `head=0x00000000 depth=0 ra=0x0023A164`.
+
+This is the smoking gun.  The boot chain in sub_239C40 (ra=0x23A164 is
+inside that function) reaches the call to the list walker exactly once.
+At that moment, the list is empty (head=0) — which is exactly what the
+cycle 27 phase 3 theory predicted: the 66 dataSegNoop'd boot callbacks
+never prepended their nodes, so the walker has nothing to consume.
+
+The trace also confirms phase 4's narrative end-to-end:
+  239C40 boot → builds linked list (NOT — dataSegNoop blocks this)
+              → calls listWalker via 2EADD0 → walks empty list
+              → walker returns immediately
+              → boot continues, no subsystems initialized.
+
+Trace hook left ACTIVE at low cadence (every 600th call).  Future cycles
+that unblock the callback prepends will see depth go from 0 → 66, which
+is the immediate verification signal.
+
+## [2026-05-24 11:15] SESSION PAUSE — cycle 27 end (5 phases, 5 commits)
 
 **Type:** session-marker
 **Cycle:** 27

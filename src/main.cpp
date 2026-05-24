@@ -2183,6 +2183,40 @@ int main(int argc, char* argv[])
         });
     }
 
+    // --- 0x2EADD0  list-walker wrapper — trace, dump linked-list state ---
+    //
+    // sub_002EADD0 is a 1-instruction tail-jump to func_2E9170 (the
+    // linked-list walker that pops nodes off the list at 0x446AD0 and
+    // calls (node->fn)(node->data, -1) for each).  Called from
+    // sub_00239C40 during boot.
+    //
+    // Trace head-of-list when this fires.  If the list is empty (head=0)
+    // the walker does nothing and returns immediately.  Cycle 27 phase 4
+    // confirmed: dataSegNoop short-circuits the 66 boot callbacks that
+    // would have populated this list, leaving it empty.  This trace makes
+    // that visible at the call site.
+    {
+        extern void sub_002EADD0_0x2eadd0(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x2EADD0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint64_t> s_n{0};
+            const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t head = *(uint32_t*)(rdram + 0x446AD0u);
+            if (n < 8u || (n % 600u) == 0u) {
+                uint32_t depth = 0u;
+                uint32_t cur   = head;
+                while (cur != 0u && depth < 100u && cur < 0x2000000u) {
+                    cur = *(uint32_t*)(rdram + cur);
+                    ++depth;
+                }
+                printf("[TRACE listWalker 0x2EADD0] call#%llu head=0x%08X depth=%u ra=0x%08X\n",
+                       (unsigned long long)n, head, depth, GPR_U32(ctx, 31));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2EADD0u;
+            sub_002EADD0_0x2eadd0(rdram, ctx, runtime);
+        });
+    }
+
     // --- 0x302DF0  moduleManager_mainLoop — runtime trace ---
     //
     // CLAUDE.md: "Game's infinite main loop: moduleDispatch → userInit → repeat".
