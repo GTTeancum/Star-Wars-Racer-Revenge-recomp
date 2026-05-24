@@ -85,6 +85,87 @@ Rollback: the diag hook is one-shot, fully reversible. The committed work
 is the same code currently in the working tree, which has already been
 runtime-verified stable.
 
+## [2026-05-24 09:55] Cycle 27 result — module-manager trace findings
+
+**Type:** result
+**Cycle:** 27
+
+Smoke log: `logs/smoke_trace27_out.txt` (15s headless run).
+
+**moduleManager_mainLoop (0x302DF0) IS running** — 2560+ calls in 15s
+(~167/sec). The trace fires from the `gameLoopThread` bootstrap restart-loop
+in main.cpp (line ~252), not from natural EE flow. Per-iteration:
+  - `jal func_308B00 ($a0=6)`  — module dispatcher for module 6
+  - `jal func_1000B8 ($a0=1)`  — second per-iteration call
+  - `b loop` → preemption fires, returns to bootstrap, restarts immediately
+
+**moduleMain (0x2E9150) NEVER fires** — trace never logged. The bootstrap
+calls 0x302DF0 directly, bypassing the natural moduleMain entry. So the
+infrastructure that 0x2E9150 would have set up (entered via its own switch
+prologue) is not exercised. This is a recompile-vs-original divergence:
+real PS2 enters via _start → ... → 0x2E9150 → 0x302DF0.
+
+**sub_0031D200 IS NEVER called** — `[D200-interp]` never logs. Call chain
+back from 0x31D200: sub_31C650 → (sub_31C310 / sub_31BF00 / sub_31C650
+recursive) → sub_316310 → sub_2B06F0 / sub_316250 → (deeper, untraced).
+None of these are reached. The 748KB game-logic function is dormant.
+
+**func_13FDA0 (render infrastructure init) DID complete** — `[DIAG sub_13FDA0]
+EXIT rv=0x00000000`, modBase[0x22C]=0x1 (init flag set by func_13FDA0's
+first instruction). The FFF500 sentinel + bypass chain is doing its job;
+the render init path runs to its natural return.
+
+**State plateau confirmed unchanged from cycle 26:** state6=0xffffffff (done),
+0x384670=0x251B10 (gs_initState), per-frame sif_dmaSend ASCII log channel
+ticks ("Sending texture while getting texture"), capA/capB=0 (no IOP GFX
+module without CDVD).
+
+## [2026-05-24 09:58] Cycle 27 decision — no further synthetic kicks without CDVD
+
+**Type:** decision
+**Cycle:** 27
+
+*Question:* Should the cycle pursue another synthetic state-machine kick
+(e.g. inject a write into 0x384670 with a known game-logic state function)
+to try to advance past gs_initState?
+
+*Answer:* No. Stop after committing the trace + findings.
+
+*Reasoning:*
+- The chain from frameDispatch → 0x384670 → game-logic eventually requires
+  sub_0031D200 to actually execute. That function is 748KB, generates a
+  2.2GB .cpp, has 55627 labels, and has been a known unsolved problem
+  across cycles 24–27.
+- The chunking experiment (split_giant_function.py, build_chunks_parallel.py)
+  produces one 24MB chunk_0000 + ~120 sub-MB chunks. Only chunk_0010
+  compiles with clang-cl as-is; the 24MB head needs further splitting.
+  This is multi-cycle work outside one autonomous run's budget.
+- Without sub_0031D200 running, no synthetic kick to 0x384670 will
+  meaningfully advance game state: any game-logic state function will
+  reach back into the 0x31xxxx range and stub out.
+- Per CLAUDE.md, the true blocker is CDVD (the IOP GFX module loaded
+  from disc writes capA/capB; without those, even VIF1 3D never runs).
+  CDVD support is a multi-cycle infrastructure project, not a one-cycle
+  patch.
+
+*What I'd change if this is wrong:* if a small/targeted intervention surfaces
+that genuinely advances state (e.g. a single uncompiled function in the chain
+that, once stubbed, lets sub_31C650 fall through), revisit. Until then the
+trace + findings are the cycle's deliverable.
+
+## [2026-05-24 10:00] SESSION PAUSE — cycle 27 end
+
+**Type:** session-marker
+**Cycle:** 27
+
+Build green, smoke stable, traces in place. Trace hooks left ACTIVE in
+main.cpp (low-volume — every 60th moduleMain call, every 120th
+moduleManager call) so future cycles get the data for free.
+
+Files clean, committed. Next cycle picks up from `git log` + this entry.
+The chain-back from 0x31D200 (documented above) is the most useful
+artifact for the next cycle's planning.
+
 ## [2026-05-21 20:50] SESSION START
 
 **Type:** session-marker

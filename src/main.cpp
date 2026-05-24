@@ -2073,6 +2073,60 @@ int main(int argc, char* argv[])
         fflush(stdout);
     });
 
+    // --- 0x2E9150  moduleMain entry — runtime trace ---
+    //
+    // Per CLAUDE.md, 0x2E9150 is the interior entry of sub_002E90F0 used to
+    // kick off the module manager.  sub_002E90F0 internally calls
+    // sub_00302DF0 (moduleManager_mainLoop) — the game's infinite main loop.
+    //
+    // The runtime currently parks the EE main thread at pc=0x1000ac and shows
+    // module state[6] advancing to "done" but no further game progression.
+    // Open question: does moduleMain (and therefore moduleManager_mainLoop)
+    // ever actually run?  Trace entry/exit + call count.
+    //
+    // NOTE: 0x2E9150 already has a one-shot registration at ~line 1165 above
+    // (the plain trampoline).  registerFunction in PS2Recomp's runtime accepts
+    // replacement; this hook will override it with the same trampoline plus
+    // a one-line entry log.
+    {
+        extern void sub_002E90F0_0x2e90f0(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x2E9150u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint64_t> s_n{0};
+            const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 4u || (n % 60u) == 0u) {
+                printf("[TRACE moduleMain 0x2E9150] call#%llu ra=0x%08X a0=0x%08X\n",
+                       (unsigned long long)n, GPR_U32(ctx, 31), GPR_U32(ctx, 4));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2E9150u;
+            sub_002E90F0_0x2e90f0(rdram, ctx, runtime);
+        });
+    }
+
+    // --- 0x302DF0  moduleManager_mainLoop — runtime trace ---
+    //
+    // CLAUDE.md: "Game's infinite main loop: moduleDispatch → userInit → repeat".
+    // If this never runs, the module-manager state machine that would drive
+    // setGameState transitions never executes, leaving frameDispatch stuck on
+    // the initial gs_initState fn for the lifetime of the process.
+    //
+    // Trace count + first-N entries to disambiguate "never called" from
+    // "called but stuck in the loop body".
+    {
+        extern void sub_00302DF0_0x302df0(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x302DF0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint64_t> s_n{0};
+            const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 4u || (n % 120u) == 0u) {
+                printf("[TRACE moduleManager 0x302DF0] call#%llu ra=0x%08X a0=0x%08X\n",
+                       (unsigned long long)n, GPR_U32(ctx, 31), GPR_U32(ctx, 4));
+                fflush(stdout);
+            }
+            ctx->pc = 0x302DF0u;
+            sub_00302DF0_0x302df0(rdram, ctx, runtime);
+        });
+    }
+
     // --- 0x00FFF200  module_keepalive_6 (synthetic) ---
     //
     // The game's module state machine (sub_00308958) reads state[6] from
