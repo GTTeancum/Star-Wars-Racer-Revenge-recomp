@@ -296,7 +296,60 @@ CDVD is still required for IOP modules (controllers, FMV, save/load,
 the real disc texture data), but it's NOT required for the VIF1 3D
 gate to open.
 
-## [2026-05-24 13:55] SESSION PAUSE — cycle 28 end (6 phases, 6 commits)
+## [2026-05-24 14:15] Cycle 28 phase 7 — prepender [11] OK; [12],[31] revert; deeper translation pattern needs work
+
+**Type:** result
+**Cycle:** 28
+
+Tried hand-translating 3 more prependers: [11], [12], [31].  Each
+needs to (a) initialize a struct on rdram, (b) call a helper function
+via runtime.lookupFunction(), (c) prepend a node to the list.
+
+Pattern used for all 3:
+```
+SET_GPR_U32(ctx, 4, $a0);  SET_GPR_U32(ctx, 5, $a1);  SET_GPR_U32(ctx, 6, $a2);
+SET_GPR_U32(ctx, 31, 0x00FFF000);  // fake ra
+ctx->pc = HELPER_VA;
+runtime->lookupFunction(HELPER_VA)(rdram, ctx, runtime);
+... do prepend ...
+ctx->pc = savedRa;
+```
+
+Results:
+- **[11] (calls func_299130)**: clean.  Zero recover-pc events.
+- **[12] + [31] (also call helper fns)**: cascading recover-pc.
+  Walker dispatched garbage PCs (`bad=0x1000000`, `bad=0x1F`, etc.)
+  during boot.  Reverted to synthPrepend.
+
+Difference: [11]'s helper (func_299130) may be a simpler init that
+doesn't reach deep into the recompiled call chain.  [12]'s
+(func_24CF80) and [31]'s (func_299130 too) seem to trigger downstream
+calls that hit unregistered addresses or corrupt stack/pc.
+
+Speculation: the C++-driven calling convention may not perfectly match
+the recompiled function's stack-frame contract.  Specifically:
+- The helper expects ra to be a real return address on the stack-saved
+  spot; we set it via SET_GPR_U32 only, not via the spilled-stack save.
+- The helper's prologue likely does `sw $ra, 0($sp)` then later
+  `lw $ra, 0($sp); jr $ra` — works if $sp/$ra are real.  But the
+  caller's stack must remain valid through the call.
+
+Cumulative cycle 28 callback coverage:
+- 52 type-A: hand-translated (matrix-write bulk)
+- 1 type-A: kept individually (cb[65])
+- 3 prependers: hand-translated ([11], [18], [34])
+- 7 other-callers + 3 prependers ([12], [30], [31]): still synthPrepend
+
+11 of 66 real, 55 of 66 unique synthPrepend.  Wait — actually
+13 of 66 real ([1..6,8,9,14..17, plus all 51 type-A entries and the
+prependers [11],[18],[34], plus cb[65]).  Let me count more carefully:
+51 type-A + 1 type-A separate (cb[65]) + 3 prependers = 55 with real
+behavior.  11 still on synthPrepend stubs.
+
+Per-frame state otherwise unchanged from phase 6: vif1Idx still
+incrementing, capA/capB=0x100, plateau visible.
+
+## [2026-05-24 14:20] SESSION PAUSE — cycle 28 end (7 phases, 7 commits)
 
 ## [2026-05-24 09:30] SESSION START — cycle 27
 

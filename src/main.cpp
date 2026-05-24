@@ -2019,6 +2019,49 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
 
+    // --- callback[11] @ 0x3CA620 — TYPE-B prepender with pre-call helper ---
+    //
+    // Shape: matrix-init at $a0, jal func_299130(...), jal sub_002E91C0.
+    //   $a0=0x435690 (data), $a1=0x299190 (fn), $a2=0x435680 (node)
+    // The matrix init follows the same identity-ish pattern as type-A
+    // callbacks.  func_299130 is a registered subsystem init function.
+    runtime.registerFunction(0x3CA620u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        if (!rdram || !ctx) return;
+        static const float kMatrix[16] = {
+            0.f, 0.f, 0.f, 1.f,  1.f, 0.f, 0.f, 1.f,
+            0.f, 1.f, 0.f, 1.f,  0.f, 0.f, 1.f, 1.f,
+        };
+        std::memcpy(rdram + 0x435690u, kMatrix, sizeof(kMatrix));
+        // Call func_299130($a0=0x435690, ...) via runtime
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        SET_GPR_U32(ctx, 4, 0x00435690u); // $a0
+        SET_GPR_U32(ctx, 5, 0x00299190u); // $a1 (the fn ptr that will be registered)
+        SET_GPR_U32(ctx, 6, 0x00435680u); // $a2 (node ptr)
+        SET_GPR_U32(ctx, 31, 0x00FFF000u); // fake $ra so the callee returns predictably
+        ctx->pc = 0x00299130u;
+        auto fn = runtime->lookupFunction(0x00299130u);
+        if (fn) fn(rdram, ctx, runtime);
+        // Restore args after the call (caller-saved are clobbered) and prepend
+        const uint32_t oldHead = *(uint32_t*)(rdram + 0x446AD0u);
+        *(uint32_t*)(rdram + 0x435680u + 0u) = oldHead;
+        *(uint32_t*)(rdram + 0x435680u + 4u) = 0x00299190u;
+        *(uint32_t*)(rdram + 0x435680u + 8u) = 0x00435690u;
+        *(uint32_t*)(rdram + 0x446AD0u) = 0x435680u;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[11] 0x3CA620] init + func_299130 + prepend at 0x435680\n");
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 31, savedRa);
+        ctx->pc = savedRa;
+    });
+
+    // callback[12] @ 0x3CA6D0 + callback[31] @ 0x3CAFF0 — reverted in cycle 28
+    // phase 7.  Their helper calls (func_24CF80, func_299130) produced
+    // cascading recover-pc events when invoked from the C++ wrapper context.
+    // Need deeper investigation of the calling convention / stack contract
+    // before re-attempting.  Left on synthPrepend for now.
+
     // --- callback[34] @ 0x3CB140 — TYPE-B "prepender" (tail-jump j 0x2E91C0) ---
     //
     // Same shape as cb[18]:
@@ -2650,6 +2693,7 @@ int main(int argc, char* argv[])
         // Type-A callback PCs (must match kTypeA[] in the typeABulk block)
         // plus prepender overrides (callback[18] @ 0x3CA9F0):
         static const uint32_t kSkipPcs[] = {
+            0x003CA620u, // [11] prepender (matrix + func_299130)
             0x003CA9F0u, // [18] prepender
             0x003CB140u, // [34] prepender
             0x003CA020u, 0x003CA0A0u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
