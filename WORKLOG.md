@@ -153,7 +153,85 @@ that genuinely advances state (e.g. a single uncompiled function in the chain
 that, once stubbed, lets sub_31C650 fall through), revisit. Until then the
 trace + findings are the cycle's deliverable.
 
-## [2026-05-24 10:00] SESSION PAUSE — cycle 27 end
+## [2026-05-24 10:30] Cycle 27 phase 3 — BIG finding: dataSegNoop was masking 66 boot callbacks
+
+**Type:** blocker-resolved
+**Cycle:** 27
+
+Smoke logs:
+- `logs/iter_trace_out.txt`, `logs/iter_dump_out.txt` — full callback array dump
+- `logs/cb_interp_out.txt`, `logs/cb_interp_err.txt` — interpreter routing attempt
+- `logs/mmi_out.txt`, `logs/mmi_err.txt` — interpreter + MMI-as-move fix
+
+**Discovery chain:**
+
+1. Added trace on `0x2e9210` (entry_2E91F0 callback iterator).  First call
+   showed s0=0x3CC548, s1=0x3CC650, fp=0x3C9F70 — a 66-entry function-pointer
+   array at 0x3CC548 dispatched via `s0=a0; do { jalr READ32(s0); s0+=4 }
+   while (s0<s1)`.  See `sub_002E91C0`/entry_2E91F0 disassembly.
+
+2. Dumped the array contents: all 66 entries point into 0x3C9F70..0x3CC3D0
+   (interior labels inside sub_0031D200, the 748KB game-logic function
+   excluded from build).
+
+3. Discovered that main.cpp line ~2293 (pre-loadELF) bulk-registers
+   `0x3C7B80..0x3CE000` with `dataSegNoop` — a stub that just returns
+   `jr $ra`.  This was a cycle-3-era workaround for "Function at address
+   0x3ca020 not found" warnings.  Side effect: **every boot-init callback
+   the iterator dispatches is silently noop'd**.
+
+   The hasFunction() returning true on these addresses (despite no specific
+   registration in register_functions.cpp) is explained by this bulk
+   pre-registration.
+
+**Attempted fix (reverted):**
+
+Replaced dataSegNoop with sub_0031D200_0x31d200 (MIPS interpreter stub)
+across 0x3C7B80..0x3D5A00.
+
+Result: catastrophic regression after 3 callbacks.
+- Callback at pc=0x3c7c20 made deep JAL chains into recompiled functions
+  (func_310440 → func_30f8d0 → func_311008 → ~60 nested calls)
+- Stack save/restore mismatch between interpreted and recompiled frames
+  corrupted $ra
+- Eventually `[interp] JR -> 0x3` (invalid PC)
+- Runtime fell into 8k recover-pc events; setGameState never fired
+- Per-frame state stuck at 0x0 instead of 0x251B10
+
+**MMI-as-move interpreter fix (KEPT in ps2_mips_interp.cpp):**
+
+The first interpreter run also revealed `[interp] MMI instr 0x70801628
+at pc=0x2e91c4 -- skipped` (paddub $v0, $a0, $zero — used as a register
+move in the recompiled shim).  Added MMI handler that treats
+`paddub/paddh/paddw rd, rs, $zero` as `rd = rs` (the common compiler idiom).
+
+Even with the MMI fix, the deeper interpreter↔recompiled frame
+contract mismatch still crashes.  The MMI fix is left in for future use.
+
+**Final state of cycle 27 phase 3:**
+
+- dataSegNoop registration RESTORED with explanatory comment pointing to
+  this WORKLOG entry.  Build green, runtime back to the cycle-26 plateau.
+- MMI handler improvement kept.
+- New trace+dump+register hooks left ACTIVE in main.cpp (low cadence: one
+  full dump at first iterator entry, then periodic).  Provides ongoing
+  observability of the boot-init callback array for free.
+
+**Implication for future cycles:**
+
+The path to real game-logic execution requires either:
+(a) Making the interpreter handle JAL/JR contract identically to recompiled
+    functions (stack frame, $ra save/restore, preemption semantics).
+(b) Compiling sub_0031D200 in chunks so each callback runs as native code
+    (the existing build_chunks_parallel.py work-in-progress).
+(c) Reverse-engineering individual callbacks and hand-stubbing them in
+    main.cpp at known-safe behaviour.
+
+(b) was already known.  (a) and (c) are new candidates surfaced this cycle.
+(c) has the smallest blast radius — start with callback[0] at 0x3C9F70
+and work down the list, hand-translating the MIPS in each interior label.
+
+## [2026-05-24 10:35] SESSION PAUSE — cycle 27 end
 
 **Type:** session-marker
 **Cycle:** 27

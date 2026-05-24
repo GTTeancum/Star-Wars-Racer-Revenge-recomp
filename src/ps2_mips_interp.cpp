@@ -514,13 +514,33 @@ static void execOne(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime,
 
     // MMI / R5900 multimedia (op=0x1C)
     case 0x1C: {
-        // Very limited subset: MADD/MADDU/PMFHI/PMFLO/etc.
-        // The overlay code primarily uses integer ops — if MMI appears,
-        // it's unexpected. Log the first few and skip.
-        static int mmiWarn = 0;
-        if (++mmiWarn <= 5)
-            std::cerr << "[interp] MMI instr 0x" << std::hex << instr
-                      << " at pc=0x" << (pc - 4) << std::dec << " -- skipped" << std::endl;
+        // R5900-specific 128-bit parallel-arithmetic instructions.
+        //
+        // Most appearances in compiler-generated code are "parallel X with
+        // rt=$zero" — a paddub/paddh/paddw of (rs, $zero) — which the
+        // recompiler emits as a fast 128-bit register move that preserves
+        // the upper 64 bits of the register.
+        //
+        // For correctness in our 64-bit-view interpreter, treat
+        //   paddub/paddh/paddw rd, rs, $zero    →    rd = rs
+        // i.e. an integer register copy.  This covers the overwhelmingly
+        // common "MMI as register-to-register move" idiom that PS2Recomp's
+        // recompiler emits in switch-prologue setup and elsewhere.
+        //
+        // For rt != $zero, the MMI is doing real parallel arithmetic which
+        // requires SIMD-style emulation; we don't yet have that path, so
+        // log + skip (rd left unchanged).  This matches the prior behaviour
+        // for those cases, but unblocks the much more frequent rt=0 form.
+        if (rt == 0u && rd != 0u) {
+            setGpr32(ctx, rd, gpr32(ctx, rs));
+        } else {
+            static int mmiWarn = 0;
+            if (++mmiWarn <= 8)
+                std::cerr << "[interp] MMI instr 0x" << std::hex << instr
+                          << " at pc=0x" << (pc - 4) << " funct=0x" << funct
+                          << " rs=" << std::dec << rs << " rt=" << rt
+                          << " rd=" << rd << " -- skipped (non-move MMI)" << std::endl;
+        }
         break;
     }
 

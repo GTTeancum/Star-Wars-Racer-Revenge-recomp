@@ -2073,6 +2073,86 @@ int main(int argc, char* argv[])
         fflush(stdout);
     });
 
+    // --- 0x2E91C0 / 0x2e9210 — callback array iterator trace ---
+    //
+    // sub_002E91C0 contains entry_2E91F0: a callback array iterator that
+    // walks $a0..$a1 calling each function pointer in turn (the `s0=a0;
+    // do { v0=READ32(s0); jalr v0; s0+=4 } while (s0<s1)` pattern at
+    // 0x2e91f0..0x2e9230). sub_239C40 tail-jumps into this iterator with a
+    // callback array populated during boot.
+    //
+    // Cycle 27 finding: sub_239C40 exits with pc=0x2e9210 (interior label
+    // inside the iterator's jalr step), suggesting an inner JALR returned
+    // unexpected pc and 239C40 preempted. 0x2e9210 IS registered as an entry
+    // to sub_002E91C0 (register_functions.cpp), so the runtime's recover-pc
+    // loop SHOULD dispatch back into the iterator. Trace to confirm this
+    // happens, with $s0/$s1 and the function ptr it's about to call.
+    {
+        extern void sub_002E91C0_0x2e91c0(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x2e9210u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint64_t> s_n{0};
+            const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t s0  = GPR_U32(ctx, 16);
+            const uint32_t s1  = GPR_U32(ctx, 17);
+            const uint32_t fp  = (s0 < 0x2000000u) ? *(uint32_t*)(rdram + s0) : 0u;
+            if (n < 32u || (n % 200u) == 0u) {
+                printf("[TRACE iter 0x2E9210] call#%llu s0=0x%08X s1=0x%08X fp=0x%08X ra=0x%08X\n",
+                       (unsigned long long)n, s0, s1, fp, GPR_U32(ctx, 31));
+                fflush(stdout);
+            }
+            // On the very first call, dump the entire boot-init callback array
+            // AND register any unregistered entries that fall inside the
+            // sub_0031D200 range (0x31D200..0x3D5A00) as aliases to the
+            // interpreter stub.
+            //
+            // KEY DISCOVERY (cycle 27 phase 2): the 66-entry callback array at
+            // 0x3CC548..0x3CC650 holds function pointers in the 0x3C9xxx-0x3CCxxx
+            // range — all of which lie inside sub_0031D200's 748KB span. The
+            // recompiler/analyzer never saw these addresses as call targets
+            // (they're only reached via indirect jalr through this data table),
+            // so they aren't in register_functions.cpp. When the iterator does
+            // `jalr v0` with v0=0x3CA020, lookupFunction returns null and the
+            // call silently fails. This is why the 66-callback boot init never
+            // completes its real work — every callback no-ops.
+            //
+            // Fix: register every callback in the array with the existing
+            // sub_0031D200_0x31d200 interpreter stub (large_function_stubs.cpp).
+            // The interpreter reads opcodes starting at ctx->pc, so each
+            // entry gets executed from its own pc as MIPS bytecode.
+            //
+            // This only fires once (n==0); subsequent iterator entries are no-ops.
+            if (n == 0u && s0 != 0u && s1 > s0 && (s1 - s0) < 0x400u && s1 < 0x2000000u) {
+                extern void sub_0031D200_0x31d200(uint8_t*, R5900Context*, PS2Runtime*);
+                const uint32_t count    = (s1 - s0) / 4u;
+                uint32_t registeredNow  = 0u;
+                uint32_t alreadyKnown   = 0u;
+                uint32_t outOfRange     = 0u;
+                printf("[TRACE iter 0x2E9210] dump+register array @0x%08X..0x%08X (%u entries):\n", s0, s1, count);
+                for (uint32_t i = 0; i < count; ++i) {
+                    const uint32_t addr = s0 + i * 4u;
+                    const uint32_t ptr  = *(uint32_t*)(rdram + addr);
+                    const bool inRange  = (ptr >= 0x31D200u && ptr < 0x3D5A00u);
+                    const bool already  = runtime->hasFunction(ptr);
+                    if (inRange && !already) {
+                        runtime->registerFunction(ptr, sub_0031D200_0x31d200);
+                        ++registeredNow;
+                    } else if (already) {
+                        ++alreadyKnown;
+                    } else {
+                        ++outOfRange;
+                    }
+                    printf("  [%2u] @0x%08X -> 0x%08X %s\n", i, addr, ptr,
+                           inRange ? (already ? "(already)" : "(REGISTERED)") : "(out-of-range)");
+                }
+                printf("[TRACE iter 0x2E9210] registered=%u already=%u oor=%u total=%u\n",
+                       registeredNow, alreadyKnown, outOfRange, count);
+                fflush(stdout);
+            }
+            ctx->pc = 0x2e9210u;
+            sub_002E91C0_0x2e91c0(rdram, ctx, runtime);
+        });
+    }
+
     // --- 0x2E9150  moduleMain entry — runtime trace ---
     //
     // Per CLAUDE.md, 0x2E9150 is the interior entry of sub_002E90F0 used to
@@ -2209,17 +2289,30 @@ int main(int argc, char* argv[])
     // These stubs return to $ra immediately (no-op), matching the fallback behaviour
     // but without the overhead.  The real functions in this range are small callbacks
     // (module init slots); returning early is equivalent to an empty module init.
+    //
+    // CYCLE 27 PHASE 3 NOTE — DO NOT replace with the interpreter stub yet:
+    //   These addresses include the boot-init callback array at
+    //   0x3CC548..0x3CC650 (66 entries pointing into 0x3C9F70..0x3CC3D0).
+    //   Routing them through sub_0031D200_0x31d200's MIPS interpreter
+    //   crashes within ~3 callbacks: the interpreter handles SPECIAL/IMM
+    //   ops + MMI-as-move correctly, but the boot callbacks make deep JAL
+    //   chains into real recompiled functions (func_310440 → func_30f8d0
+    //   → func_311008 → ...).  Somewhere in that nested chain $ra becomes
+    //   0x3 (likely stack save/restore mismatch between recompiled and
+    //   interpreted frames).  Resulting cascade of recover-pc events
+    //   prevents setGameState from firing — net regression.
+    //
+    //   The MMI-as-move interpreter fix (ps2_mips_interp.cpp) is left in
+    //   place — it's correct and helps any future use of the interpreter,
+    //   just not enough on its own.
+    //
+    //   Until the interpreter's call/return frame contract matches the
+    //   recompiled functions' contract, dataSegNoop is the lesser evil.
+    //   See WORKLOG cycle 27 phase 3 for the full trace.
     {
         auto dataSegNoop = +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
             if (ctx) ctx->pc = GPR_U32(ctx, 31); // jr $ra — return to caller
         };
-        // Cover the observed dispatch range 0x3C7B80-0x3CE000 at 4-byte alignment.
-        // The step is 4 so any function at any valid MIPS alignment is covered.
-        // Upper bound extended from 0x3CA000 to 0x3CE000: boot output shows
-        // "Warning: Function at address 0x3ca020 not found" through ~0x3cb300;
-        // the data-segment module-registration callbacks run up to ~0x3D5BB0
-        // but we cap at 0x3CE000 to avoid covering legitimate late-registered
-        // functions.  If warnings persist above 0x3CE000, extend further.
         for (uint32_t addr = 0x3C7B80u; addr < 0x3CE000u; addr += 4u) {
             runtime.registerFunction(addr, dataSegNoop);
         }
