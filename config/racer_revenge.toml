@@ -3412,4 +3412,14 @@ address = "0x80076488"  # syscall 0x12C
 [[extra_entry_points]]
 address = "0x800766C0"  # syscall 0x08
 
+# Cycle 28 phase 6 — boot-callback fn pointers (used by callbacks [12],[31],[34]
+# as the fn registered in the list at 0x446AD0; each is an interior label that
+# the list walker (sub_002E9170) invokes via jalr).
+[[extra_entry_points]]
+address = "0x24D390"  # callback[12] fn ptr — interior label inside sub_0024CF80
+[[extra_entry_points]]
+address = "0x29E200"  # callback[31] fn ptr — interior label inside sub_0029E190
+[[extra_entry_points]]
+address = "0x2A3180"  # callback[34] fn ptr — interior label inside sub_002A3140
+
 

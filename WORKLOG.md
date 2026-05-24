@@ -243,7 +243,60 @@ Additional discovery during phase 5 work:
   their function calls are missed).  Translating each to call the
   intended helper requires per-callback decode.
 
-## [2026-05-24 13:30] SESSION PAUSE — cycle 28 end (5 phases, 5 commits)
+## [2026-05-24 13:50] Cycle 28 phase 6 — CDVD stub + callback[34] + VIF1 engaged
+
+**Type:** milestone
+**Cycle:** 28
+
+Two changes this phase:
+
+**A. callback[34] hand-translated** (sibling of cb[18]).  Same shape:
+prepend node at 0x443960 with fn=0x2A3180, data=0x443970.  fn was
+previously an unregistered interior label; added to TOML
+extra_entry_points and ran inject_extra_entry_points.py (3 new entries:
+0x24D390, 0x29E200, 0x2A3180).  Now the list walker pops cb[34]'s
+real node and calls sub_002A3140 at the 0x2A3180 entry — real
+recompiled code runs.
+
+**B. CDVD stub for capA/capB (HUGE).**  Wrote `capA = capB = 0x100`
+in bootstrap Phase 5b (after BSS clear, before runtime.run).
+
+Effect — `vif1Idx` is now **incrementing every frame**:
+  frame=1   vif1Idx=0
+  frame=61  vif1Idx=0x1C   (28 packets queued)
+  frame=181 vif1Idx=0x43   (67)
+  frame=301 vif1Idx=0x5F   (95)
+  ...
+
+**`vif1_buildPacket` (0x257080) is actively running** — it was
+previously gated off by `capA=capB=0` for the entire run.  This is the
+first time the recompiled VIF1 build path has executed in this repo.
+
+However, `VIF1_MARK` stays 0 — packets are being built incrementally
+but not "marked complete for submission" yet.  And the visible
+screenshot is still just the synthetic test triangle (no new game-
+side polygons reaching the GS).  So the VIF1 path is RUNNING but the
+end-of-packet MARK is not firing.
+
+Next investigation: trace vif1_buildPacket to see WHERE in the build
+it returns without completing.  May be waiting on:
+- A VU1 microprogram load (we have no VU1 interpreter)
+- A specific gsState field that's still zero
+- An MMI op the runtime mishandles
+
+Stderr: zero recover-pc, zero first-bad-pc, zero Warning — clean.
+
+This is also the first cycle where capA/capB has been non-zero in any
+test in this repo's history.  Previous analysis (CLAUDE.md cycle 26)
+said "CDVD is the only thing that writes capA/capB."  We just
+demonstrated that's not strictly true — writing them directly works,
+the downstream code accepts the values, and the VIF1 build engages.
+
+CDVD is still required for IOP modules (controllers, FMV, save/load,
+the real disc texture data), but it's NOT required for the VIF1 3D
+gate to open.
+
+## [2026-05-24 13:55] SESSION PAUSE — cycle 28 end (6 phases, 6 commits)
 
 ## [2026-05-24 09:30] SESSION START — cycle 27
 

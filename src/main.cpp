@@ -675,6 +675,26 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     }
                 }
 
+                // --- Phase 5b: CDVD-stubbed VIF1 capacity values ---
+                //
+                // capA (0x43AA04) and capB (0x43FA08) are the VIF1 ring-buffer
+                // size limits checked by vif1_buildPacket (0x257080).  On real
+                // PS2, the IOP GFX module (loaded from disc by CDVD) writes
+                // these.  Without CDVD they stay 0, vif1_buildPacket sees no
+                // capacity, and the entire VIF1 3D path is gated off forever.
+                //
+                // CYCLE 28 EXPERIMENT: write a plausible non-zero capacity to
+                // both, and see if vif1_buildPacket starts engaging the VIF1
+                // path.  Pick 0x100 (256 packets) — large enough for typical
+                // per-frame draw counts, small enough not to overflow any
+                // sibling assumption.  This is purely diagnostic — if it
+                // produces a crash we revert; if it advances the pipeline,
+                // we've unblocked one more downstream gate.
+                Ps2FastWrite32(rdram, 0x43AA04u, 0x100u);
+                Ps2FastWrite32(rdram, 0x43FA08u, 0x100u);
+                std::cout << "[Bootstrap] CDVD-stub: capA=capB=0x100 written "
+                             "(unlocks VIF1 buildPacket capacity gate)" << std::endl;
+
                 // Debug dump after all initialization
                 dumpGsState();
 
@@ -1999,6 +2019,30 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
 
+    // --- callback[34] @ 0x3CB140 — TYPE-B "prepender" (tail-jump j 0x2E91C0) ---
+    //
+    // Same shape as cb[18]:
+    //   $a0=0x443970, $a1=0x2A3180 (fn), $a2=0x443960 (node), WRITE32 zeros
+    //
+    // fn=0x2A3180 is an interior label inside sub_002A3140; registered as
+    // an extra entry point in cycle 28 phase 6 (TOML edit + injection).
+    runtime.registerFunction(0x3CB140u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        *(uint32_t*)(rdram + 0x443970u) = 0u;
+        *(uint32_t*)(rdram + 0x443974u) = 0u;
+        const uint32_t oldHead = *(uint32_t*)(rdram + 0x446AD0u);
+        *(uint32_t*)(rdram + 0x443960u + 0u) = oldHead;
+        *(uint32_t*)(rdram + 0x443960u + 4u) = 0x002A3180u;
+        *(uint32_t*)(rdram + 0x443960u + 8u) = 0x00443970u;
+        *(uint32_t*)(rdram + 0x446AD0u) = 0x443960u;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[34] 0x3CB140] prepended node at 0x443960 fn=0x2A3180 data=0x443970\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- callback[18] @ 0x3CA9F0 — TYPE-B "prepender" (tail-jump j 0x2E91C0) ---
     //
     // Short tail-jump callback:
@@ -2607,6 +2651,7 @@ int main(int argc, char* argv[])
         // plus prepender overrides (callback[18] @ 0x3CA9F0):
         static const uint32_t kSkipPcs[] = {
             0x003CA9F0u, // [18] prepender
+            0x003CB140u, // [34] prepender
             0x003CA020u, 0x003CA0A0u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
             0x003CA390u, 0x003CA410u, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
             0x003CA970u, 0x003CAA20u, 0x003CAAA0u, 0x003CAB20u, 0x003CABA0u,
