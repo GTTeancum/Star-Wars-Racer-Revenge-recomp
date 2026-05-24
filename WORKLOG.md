@@ -88,7 +88,49 @@ walker) at 0x003CC3D0 is the natural starting point — popping it first
 means any downstream init it triggers happens before later ones, which
 mirrors the natural LIFO ordering.
 
-## [2026-05-24 12:05] Cycle 28 phase 1 — pause point
+## [2026-05-24 12:25] Cycle 28 phase 2 — FIRST hand-translated boot callback: callback[65]
+
+**Type:** milestone
+**Cycle:** 28
+
+Decoded callback[65] at 0x3CC3D0 (~30 instructions).  Pure data init:
+builds a 4×4-float matrix on the stack, then stores 4 quadwords (64
+bytes total) to rdram[0x446A40..0x446A7F].  Does NOT call sub_002E91C0.
+
+Hand-translated as a registered override at 0x3CC3D0.  Synthesised the
+matrix in C++ from the decoded stack writes:
+
+  Row 0 (0x446A40): {0, 0, 0, 1.0}
+  Row 1 (0x446A50): {1.0, 0, 0, 1.0}
+  Row 2 (0x446A60): {0, 1.0, 0, 1.0}
+  Row 3 (0x446A70): {0, 0, 1.0, 1.0}
+
+synthPrepend loop now skips 0x3CC3D0 so the override survives.
+
+Smoke result (`logs/cb65_out.txt`):
+- `[callback[65] 0x3CC3D0] wrote 64-byte matrix to rdram[0x446A40..0x446A7F]`
+- listWalker call#0 head=0x004F0300 depth=65 (was 66; callback[65] no
+  longer prepends a synthetic node)
+- Walker pops the 65 remaining synthetic entries cleanly
+- Plateau unchanged otherwise
+
+**This is the proof-of-concept for the hand-translation approach.**
+
+Each of the 66 callbacks is small (typically 30-90 MIPS instructions)
+and falls into one of two patterns (so far):
+  (A) Data-only init: build local data, store to a fixed rdram address.
+      callback[65] is one of these — `~30 instructions`, no calls.
+  (B) Init + list-prepend: setup struct, then jal func_2E91C0 to
+      register a {fn, data} node in the list at 0x446AD0.
+      callback[0] (0x3C9F70) appears to be a third pattern: jal
+      func_11AE30 with no list-prepend.
+
+To replace the remaining 65 synthetic nodes with real behaviour:
+decode + translate each callback in turn.  Estimate: ~30-90 min per
+callback when the pattern is type A; longer for type B/other.  Over
+multiple cycles this is tractable.
+
+## [2026-05-24 12:30] SESSION PAUSE — cycle 28 end
 
 ## [2026-05-24 09:30] SESSION START — cycle 27
 

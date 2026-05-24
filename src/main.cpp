@@ -1997,6 +1997,44 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
 
+    // --- 0x3CC3D0  callback[65] — first real hand-translation ---
+    //
+    // Decoded callback (cycle 28 phase 2):
+    //   1. Builds a 4×4-float matrix on the stack (zeros + 1.0f pattern):
+    //      Row 0: {0, 0, 0, 1.0}
+    //      Row 1: {1.0, 0, 0, 1.0}
+    //      Row 2: {0, 1.0, 0, 1.0}
+    //      Row 3: {0, 0, 1.0, 1.0}
+    //   2. Loads each row as a 128-bit quadword via `lq` into $a2/$a1/$a0/$v1
+    //   3. Stores those 4 quadwords to rdram[0x446A40..0x446A7F] via `sq`
+    //   4. jr $ra
+    //
+    // Does NOT call sub_002E91C0 — callback[65] is data-only init, NOT
+    // a list-prepend callback.  So this override does NOT need to also
+    // prepend to the list (and replaces synthPrepend's behaviour at this
+    // address, which was incorrectly prepending a dummy node).
+    //
+    // Effect: rdram[0x446A40..0x446A7F] gets the real 64-byte matrix
+    // instead of staying zeroed (the BSS clear sets it to 0 at boot).
+    // Located 0x90 bytes before the list-head at 0x446AD0 — likely part
+    // of the same registry data structure.
+    runtime.registerFunction(0x3CC3D0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        static const float kMatrix[16] = {
+            0.f, 0.f, 0.f, 1.f,
+            1.f, 0.f, 0.f, 1.f,
+            0.f, 1.f, 0.f, 1.f,
+            0.f, 0.f, 1.f, 1.f,
+        };
+        std::memcpy(rdram + 0x446A40u, kMatrix, sizeof(kMatrix));
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[65] 0x3CC3D0] wrote 64-byte matrix to rdram[0x446A40..0x446A7F]\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- 0x00FFF600  list-walker callback logger (synthetic) ---
     //
     // Installed as the fn pointer in nodes prepended by synthPrepend.
@@ -2447,6 +2485,10 @@ int main(int argc, char* argv[])
         // deferred to the first prepend.
 
         for (uint32_t addr = 0x3C7B80u; addr < 0x3CE000u; addr += 4u) {
+            // Skip addresses that have a hand-translated override (registered
+            // earlier above).  registerFunction overwrites, so without this
+            // skip the synthPrepend bulk loop clobbers our specific overrides.
+            if (addr == 0x3CC3D0u) continue; // callback[65] hand-translation
             runtime.registerFunction(addr, synthPrepend);
         }
         std::cout << "[Bootstrap] synthPrepend installed for 0x3C7B80..0x3CE000 "
