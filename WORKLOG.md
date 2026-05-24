@@ -231,7 +231,95 @@ The path to real game-logic execution requires either:
 (c) has the smallest blast radius — start with callback[0] at 0x3C9F70
 and work down the list, hand-translating the MIPS in each interior label.
 
-## [2026-05-24 10:35] SESSION PAUSE — cycle 27 end
+## [2026-05-24 10:50] Cycle 27 phase 4 — decode callback[0] shape
+
+**Type:** result
+**Cycle:** 27
+
+Decoded callback[0] at 0x3C9F70 (`python tools/decode_mips.py 0x3C9F70 256`).
+
+Shape (typical for all 66 entries in the array):
+```
+addiu $sp, -0x50        ; small stack frame
+sq $ra, 0($sp)          ; save ra (MMI sq)
+sw $zero, +16..+44($sp) ; zero stack slots
+lui $v0, 0x3F80         ; 1.0f constant
+sw $v0, +20..+76($sp)   ; spread 1.0f across stack
+lui $a0, 0x37           ; load globals/constants
+lw $a0, -21064($a0)     ; eg. READ32(0x37ADB8)
+lui $v0, 0x43           ; $v0 = 0x430000
+addiu $a2, $v0, 0x5680  ; $a2 = 0x435680 (STATIC data-seg node ptr)
+jal 0x2E91C0            ; prepend to linked list at 0x446AD0
+lq $ra, 0($sp)
+jr $ra
+addiu $sp, 0x50
+```
+
+**Key insight:** sub_002E91C0 (the destination of the `jal`) is a **linked-
+list prepend** operation:
+```
+*($a2+0) = READ32(0x446AD0)   ; new node's next = old head
+*($a2+4) = $a1                ; data field 1
+*($a2+8) = $a0                ; data field 2
+WRITE32(0x446AD0, $a2)        ; new head = $a2
+```
+
+So each of the 66 boot callbacks builds a static-data-segment node in the
+0x430000-range, then prepends it to a linked list rooted at 0x446AD0. The
+list is consumed later by the module/render system to enumerate
+subsystems.
+
+**With dataSegNoop short-circuiting the callbacks, the list at 0x446AD0
+stays empty.** Anything that walks it gets zero items → "no subsystems
+to initialize" → game state machine has nothing to advance through.
+
+This is a unified explanation of the plateau: the entire boot-init
+subsystem registration is silently empty.
+
+## [2026-05-24 10:55] Cycle 27 phase 4 decision — hand-translate vs interpreter contract fix
+
+**Type:** decision
+**Cycle:** 27
+
+*Question:* What's the right path to actually populate the 0x446AD0 list?
+
+*Options considered:*
+1. Hand-translate all 66 callbacks to C++ overrides. ~90 MIPS instructions
+   each × 66 = 5,940 lines of careful hand-translation. Each callback has
+   non-trivial struct initialization (floats, pointers, padding) that
+   must match the ABI exactly for the list consumers.
+2. Fix the interpreter's call/return contract so it can drive the
+   callbacks correctly. Requires modeling 128-bit register save/restore
+   (the `sq $ra, 0($sp)` MMI store), the recompiler's preemption-resume
+   protocol, and likely the in-flight delay-slot state.
+3. Compile sub_0031D200 in chunks (existing build_chunks_parallel.py).
+   The 24MB chunk_0000 head is the blocker — needs further splitting.
+4. Replace 0x2E91C0 with a "synthetic prepend" that fabricates a generic
+   node every time it's called, just to populate the list. Won't satisfy
+   field-specific consumers but might at least surface the next blocker.
+
+*Answer:* End cycle here. None of the four is a one-cycle change.
+
+*Reasoning:*
+- (1) Largest single effort.  No incremental value: list consumers likely
+  check struct fields, so partial translation = invalid list.
+- (2) Deepest infrastructure work.  Affects every interpreter call, not
+  just D200.  High risk of regressing already-working behaviour.
+- (3) Was already in-progress and known to be multi-cycle.  Not advanced
+  this cycle.
+- (4) Could surface the next blocker but adds noise to the diagnostic
+  picture without progressing real behaviour.
+
+The cycle's deliverable is the **understanding**: we know now WHY the
+plateau is stable (66 boot callbacks silently noop'd, leaving the
+subsystem-registration list empty), and we know the smallest unit of
+work that would unblock it (one hand-translated callback, verified
+against its list consumer).
+
+Next cycle should pick exactly one of (1)/(2)/(3)/(4) with full context
+from this WORKLOG entry.
+
+## [2026-05-24 11:00] SESSION PAUSE — cycle 27 end
 
 **Type:** session-marker
 **Cycle:** 27
