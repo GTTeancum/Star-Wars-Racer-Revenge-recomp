@@ -1997,6 +1997,27 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
 
+    // --- 0x00FFF600  list-walker callback logger (synthetic) ---
+    //
+    // Installed as the fn pointer in nodes prepended by synthPrepend.
+    // When the list walker (sub_002E9170) pops a node and calls
+    // (node->fn)($a0=data, $a1=-1), $a0 is the original callback PC
+    // (set as data in synthPrepend).  Log each invocation to reveal
+    // which callbacks the walker actually pops, in what order.
+    runtime.registerFunction(0x00FFF600u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<uint64_t> s_n{0};
+        const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t data = GPR_U32(ctx, 4);    // original callback PC
+        const uint32_t arg2 = GPR_U32(ctx, 5);    // -1 from walker
+        if (n < 80u || (n % 200u) == 0u) {
+            printf("[walker->FFF600] pop#%llu data=0x%08X arg=%d\n",
+                   (unsigned long long)n, data, (int32_t)arg2);
+            fflush(stdout);
+        }
+        SET_GPR_S32(ctx, 2, 0);        // $v0 = 0 (no-op return)
+        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+    });
+
     // --- 0x259E00  GS allocator bypass (sub_00259E00) ---
     //
     // Called from sub_237640 when vtable[0x9C] returns non-zero (label_2376a0),
@@ -2324,6 +2345,18 @@ int main(int argc, char* argv[])
     // but without the overhead.  The real functions in this range are small callbacks
     // (module init slots); returning early is equivalent to an empty module init.
     //
+    // CYCLE 28 PHASE 1 — REFINED SYNTHETIC PREPEND:
+    //   Restrict synthPrepend to the exact boot-init callback array range
+    //   (0x3C9F70..0x3CC3D0 = 66 entries observed via the iterator dump in
+    //   cycle 27 phase 4).  Addresses outside this range still get
+    //   dataSegNoop — phase 6's blanket synthPrepend across 0x3C7B80..
+    //   0x3CE000 created phantom list entries (128+ instead of 66).
+    //
+    //   Also: fn pointer in the synthetic node is now 0x00FFF600 (a new
+    //   sentinel that LOGS each invocation with the data field).  This
+    //   reveals which subset of the 66 callbacks the walker actually pops,
+    //   in what order, and confirms the popped data values.
+    //
     // CYCLE 27 PHASE 6 — SYNTHETIC PREPEND EXPERIMENT:
     //
     //   Background: phases 3-5 established that the 66 callbacks in
@@ -2372,18 +2405,26 @@ int main(int argc, char* argv[])
         auto synthPrepend = +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
             if (!rdram || !ctx) return;
             const uint32_t cbPc = ctx->pc;
+            // Only synth-prepend for addresses in the observed boot-init
+            // callback array range (0x3C9F70..0x3CC3D0).  Other addresses
+            // in the dataSegNoop range get the original noop behaviour.
+            const bool inCallbackArray = (cbPc >= 0x3C9F70u && cbPc <= 0x3CC3D0u);
+            if (!inCallbackArray) {
+                ctx->pc = GPR_U32(ctx, 31);
+                return;
+            }
             // Monotonic counter for pool slot — avoids pc-hash collisions.
             // Pool is 1024 slots × 12 bytes = 12KB at 0x4F0000..0x4F3000.
-            // Wraps at 1024; if we see >1024 prepend calls in one boot we
-            // overwrite oldest nodes and may create cycles (acceptable;
-            // we cap the walker trace at 100 depth anyway).
+            // Wraps at 1024; the 66 real callbacks fire once each per boot
+            // so wrap is academic.
             static std::atomic<uint32_t> s_slot{0};
             const uint32_t idx  = s_slot.fetch_add(1u, std::memory_order_relaxed) & 0x3FFu;
             const uint32_t node = 0x4F0000u + idx * 12u;
             // Prepend: node[0] = oldHead; head = node
             const uint32_t oldHead = *(uint32_t*)(rdram + 0x446AD0u);
             *(uint32_t*)(rdram + node + 0u) = oldHead;
-            *(uint32_t*)(rdram + node + 4u) = 0x00FFF400u; // fn = noop-returns-zero
+            // fn = 0x00FFF600 sentinel — logs each invocation with data field
+            *(uint32_t*)(rdram + node + 4u) = 0x00FFF600u;
             *(uint32_t*)(rdram + node + 8u) = cbPc;        // data = callback PC
             *(uint32_t*)(rdram + 0x446AD0u) = node;
             // Light periodic logging
@@ -2409,7 +2450,7 @@ int main(int argc, char* argv[])
             runtime.registerFunction(addr, synthPrepend);
         }
         std::cout << "[Bootstrap] synthPrepend installed for 0x3C7B80..0x3CE000 "
-                     "(pool=0x4F0000..0x4F0600, 128 slots, fn=0xFFF400)" << std::endl;
+                     "(restricted to 0x3C9F70..0x3CC3D0 array; pool 0x4F0000+, 1024 slots, fn=0xFFF600)" << std::endl;
     }
 
     // --- Load and run ---

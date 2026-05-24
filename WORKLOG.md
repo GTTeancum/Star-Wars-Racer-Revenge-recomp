@@ -36,6 +36,60 @@ This file is the substitute for asking Steve questions. Every decision that woul
 
 <!-- ENTRIES BELOW THIS LINE — NEWEST FIRST -->
 
+## [2026-05-24 11:55] SESSION RESUME — cycle 28
+
+**Type:** session-marker
+**Cycle:** 28
+
+User said "proceed".  Reread MANDATE/PRIORITIES/CLAUDE/WORKLOG tail.
+Continuing from cycle 27 phase 6.
+
+## [2026-05-24 12:00] Cycle 28 phase 1 — clean list-walker measurement: exactly 66
+
+**Type:** result
+**Cycle:** 28
+
+Refinements to phase 6:
+1. synthPrepend restricted to addresses in the observed callback array
+   (0x3C9F70..0x3CC3D0) instead of the whole 0x3C7B80..0x3CE000 noop
+   range.  Other addresses in that range still get the original noop.
+2. Node fn pointer changed from 0xFFF400 (silent return 0) to 0xFFF600,
+   a new sentinel that LOGS each invocation with the popped data field.
+
+Smoke log: `logs/walker_log_out.txt`.
+
+Result:
+- synthPrepend fires exactly 66 times (pcs from 0x3C9F70 monotonically
+  increasing to 0x3CC3D0, matching the array dump from phase 4).
+- `[TRACE listWalker 0x2EADD0] call#0 head=0x004F030C depth=66` —
+  EXACTLY 66 nodes, no phantom entries.
+- Walker pops in reverse order (LIFO — prepend is push, so pop is from
+  tip): pop#0=0x003CC3D0 (callback[65]), pop#65=0x003C9F70 (callback[0]).
+- Walker dispatches all 66, then list is empty; no crashes, no
+  recover-pc events.
+
+Stable plateau otherwise unchanged: state=0x251B10, capA/capB=0,
+the visible runtime is identical to phase 5.
+
+**Why this matters:**
+The list-populate/list-walk infrastructure is now PROVEN end-to-end:
+- We can populate the list with exactly the right number of entries
+- The walker pops every one of them
+- Each pop produces a call to our sentinel
+- The sentinel logs the data field, confirming each pop carries the
+  expected callback PC
+
+The only gap to actual subsystem init is: **swap the synthetic
+fn=0xFFF600 in each node for the address of a hand-translated init
+routine that does what callback[i] was supposed to do.**
+
+For the first such hand-translation, callback[65] (popped first by the
+walker) at 0x003CC3D0 is the natural starting point — popping it first
+means any downstream init it triggers happens before later ones, which
+mirrors the natural LIFO ordering.
+
+## [2026-05-24 12:05] Cycle 28 phase 1 — pause point
+
 ## [2026-05-24 09:30] SESSION START — cycle 27
 
 **Type:** session-marker
