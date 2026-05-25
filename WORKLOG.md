@@ -603,7 +603,44 @@ the binary, ready to be called.  Future cycles can:
 3. Debug what happens next (which will be NEW territory — no longer
    gated by "the function doesn't exist")
 
-## [2026-05-25 18:35] SESSION END — cycle 28 phases 8-29 (33 commits this resume)
+## [2026-05-25 19:20] Cycle 28 phase 30 — strip dispatch tables; 975MB → 125MB
+
+**Type:** MILESTONE (proper fix, not a shortcut)
+**Cycle:** 28
+**Commit:** 236c558 (stripper) + this entry's rebuild
+
+Steve flagged the 975 MB exe as absurd.  Investigation: the recompiler
+emits TWO dispatchers for every indirect jump in sub_31D200:
+  1) A switch with up to 13,882 cases (~5.7 MB each, 240+ instances)
+  2) A `runtime->lookupFunction(jumpTarget)` fallback right after
+
+The switch is purely a fast-path shortcut over the runtime hash lookup.
+For cold code like sub_31D200 (rarely called per cycle 27 trace), the
+perf gain is moot but the size cost is enormous.
+
+Wrote `tools/strip_inline_dispatch.py`: walks each chunk line-by-line,
+finds `switch (jumpTarget` and its brace-matched close, drops the
+block.  The lookupFunction handles every target the switch did
+(semantically equivalent, one hash lookup per indirect jump).
+
+Results:
+| Metric          | Before   | After  | Change  |
+|---|---|---|---|
+| Total source    | 1396 MB  | 16 MB  | -98.9%  |
+| Largest chunk   | 11.5 MB  | 1.0 MB | -91%    |
+| Average chunk   | 6.0 MB   | 33 KB  | -99.4%  |
+| Total .obj      | 1.5 GB   | 16 MB  | -98.9%  |
+| **racer_revenge.exe** | **975 MB** | **125 MB** | **-87%** |
+
+Smoke test (15s headless): runtime behavior IDENTICAL to the 975 MB
+build.  All callbacks fire, FrameDiag at frames 1/61/121/181/241 all
+green, vif1Idx incrementing 0x18→0x30→0x48→0x62, state6 advances
+0xfff200→0xffffffff at frame=61, zero recover-pc.
+
+**125 MB is only 7 MB more than the no-chunks baseline (118 MB), which
+is exactly what we'd expect: the chunks add real code, not scaffolding.**
+
+## [2026-05-25 19:25] SESSION END — cycle 28 phases 8-30 (35 commits this resume)
 
 **Headline accomplishment**: sub_0031D200, the 748KB game-logic black
 hole that has been the architectural blocker since cycle 1, is now
