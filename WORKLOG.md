@@ -573,7 +573,63 @@ Build with chunks integrated kicked off (task bw3rn821d); link step
 takes longer than usual with 482 .obj files.  Monitor armed (task
 bzwdaq2h5) to notify on errors or completion.
 
-## [2026-05-25 17:58] SESSION PAUSE — cycle 28 phases 8-28 (32 commits this resume)
+## [2026-05-25 18:30] Cycle 28 phase 29 — sub_31D200 in binary; runtime green
+
+**Type:** MILESTONE (architectural blocker now resolved)
+**Cycle:** 28
+
+CMake build with all 482 chunks completed:
+  racer_revenge.exe: 975 MB (was 118 MB)
+
+Smoke test results (logs/d200_first_run_out.txt, _err.txt):
+- Zero recover-pc events across 8s headless run
+- All callback overrides (cb[7], cb[13], cb[18], cb[34], cb[57],
+  typeABulk count=56, cb[31], cb[45]) fire correctly
+- Frame loop runs cleanly: state=0x251b10, capA=capB=0x100,
+  vif1Idx incrementing 0x12→0x2a→0x3c→0x52 across 241 frames
+- state6 advances 0xfff200 → 0xffffffff at frame=61 (module 6 done)
+- listWalker depth stable at 5
+
+Visible behavior unchanged (same plateau as before).  This was
+predicted by [[project-giant-function-blocker]]: even with sub_31D200
+compiled, the call chain leading INTO it isn't currently exercised
+(cycle 27 trace confirmed sub_31D200 was never reached).
+
+**But the architectural blocker is now resolved**: the function is in
+the binary, ready to be called.  Future cycles can:
+1. Investigate which entry points are hit when state[6] writes 22 to
+   modTable[0]
+2. Bridge the call chain to make sub_31D200 actually execute
+3. Debug what happens next (which will be NEW territory — no longer
+   gated by "the function doesn't exist")
+
+## [2026-05-25 18:35] SESSION END — cycle 28 phases 8-29 (33 commits this resume)
+
+**Headline accomplishment**: sub_0031D200, the 748KB game-logic black
+hole that has been the architectural blocker since cycle 1, is now
+part of the racer_revenge.exe binary for the first time ever.
+
+Cycle 28 path: boot callbacks (57→65) → architectural findings
+(VIF1_MARK + ExitThread + sub_31D200 black hole) → chunking
+infrastructure (byte-aware splitter + 4 correctness fixes + 3
+build-batch fixes + recompiler-bug post-processor) → full integration
+(linker guard + CMake) → 975MB binary that runs cleanly.
+
+Statistics for the resume:
+- 33 commits
+- Zero recover-pc regressions throughout
+- 3 memory entries saved
+- 5 tools created/updated (split_giant_function.py, measure_chunks.py,
+  test_chunk_compile.bat, test_chunk_compile_failures.bat,
+  fix_chunk_recompiler_bugs.py)
+- 4 documents updated (CLAUDE.md correction, WORKLOG, .gitignore,
+  CMakeLists.txt)
+- 65/66 boot callbacks translated to real overrides
+- 482/482 sub_31D200 chunks compile + link into the binary
+
+Next session's starting point: a working binary with sub_31D200
+linked.  Concrete first task: instrument to find which entry point
+of sub_31D200 should be called when state[6] = 22.
 
 Outcome of the in-flight CMake build determines next session's pickup:
 - If link succeeds: sub_0031D200 is INCLUDED in the binary for the
