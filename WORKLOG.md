@@ -229,7 +229,49 @@ Remaining 5 are all blocked by specific constraints:
 - cb[42] @ 0x3CB4A0 — extensive pre/post-matrix state setup; partial
   loses too much
 
-## [2026-05-24 20:15] SESSION PAUSE — cycle 28 phases 8-14 (10 commits this resume)
+## [2026-05-24 20:25] Cycle 28 phases 15-16 — cb[42] + cb[31] partials
+
+**Type:** milestone
+**Cycle:** 28
+**Commits:** ee80992 (cb[42]), 8dae896 (cb[31])
+
+Reconsidered earlier "skip" decisions:
+- **cb[42]**: full hand-translation infeasible (200+ instructions, loop
+  with state-dep loads), but the matrix-only partial is still strictly
+  better than synthPrepend.  Added to typeABulk.
+- **cb[31]**: prepender with helper + fn-target-is-interior-label.
+  Cannot do the prepend, but the one static data write (rdram[0x443898]
+  = 0x3D3910) is helper-independent.  Translated as standalone override.
+
+Smoke: typeABulk 55→56, listWalker depth 9→8→7, zero recover-pc.
+
+**Coverage: 63 of 66 boot callbacks now real.**
+
+Final 3 (HARD blockers, not "diminishing returns"):
+- cb[7] @ 0x3CA350 — 2 jal sub_315B60 (handle allocator) only; stores
+  helper return values; NO static data writes to partial.
+- cb[13] @ 0x3CA780 — clears capA (0x43AA04) and capB (0x43FA08) to 0;
+  faithful translation undoes the cycle-28-phase-6 CDVD stub.
+- cb[30] @ 0x3CAFA0 — prepender with 4 helpers; fn target 0x29F190 is
+  an unregistered interior label; no static data write outside helpers.
+
+Each of these requires a separate solve (handle-allocator stub,
+CDVD-stub-aware override, or `inject_extra_entry_points.py` run +
+helper-call-contract solution).  None can be addressed with the
+matrix-only or single-data-write partial patterns used in phases 9-16.
+
+## [2026-05-24 20:30] SESSION PAUSE — cycle 28 phases 8-16 (13 commits this resume)
+
+Session-wide stats:
+- 13 commits total (8 cb-translation phases, 1 architectural finding,
+  1 doc-only revert, 3 WORKLOG updates)
+- 6 callbacks translated this resume: cb[0], cb[3], cb[10], cb[42],
+  cb[45], cb[57], cb[62] (full or partial)
+- 1 standalone override: cb[31]
+- listWalker depth: 15 → 7 (53% reduction across the resume)
+- Zero recover-pc regressions across all 13 commits
+- 1 saved project memory ([[project-vif1-mark]])
+- 1 saved feedback memory ([[feedback-helper-call-stability]])
 
 Session contributed 5 real translations (cb[0], cb[3], cb[10], cb[45],
 cb[57], cb[62]) plus one significant architectural finding
