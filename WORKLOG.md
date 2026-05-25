@@ -196,7 +196,45 @@ benefit from the matrix-write partial pattern without solving deeper
 issues (capA/capB protection, helper-call instability, or
 non-matrix shapes that require full hand translation).
 
-## [2026-05-24 20:00] SESSION PAUSE — cycle 28 phases 8-13 (8 commits this resume)
+## [2026-05-24 20:10] Cycle 28 phase 14 — callback[0] partial-translated
+
+**Type:** milestone
+**Cycle:** 28
+**Commit:** c66d9a2
+
+cb[0] @ 0x3C9F70 has a non-obvious shape: builds the standard type-A
+matrix on stack via inline scalar writes, then loads it via LQ into
+$a1-$v1 and stores 4 SQ quadwords to rdram[0x434630..0x43466F].
+Confirmed the matrix layout matches type-A's standard
+[0,0,0,1, 1,0,0,1, 0,1,0,1, 0,0,1,1].
+
+After the matrix write, it loads a pointer from rdram[0x36ADB8],
+calls jal 0x11AE30, and stores the return to rdram[0x3B14B0].
+Partial drops the helper + return store; downstream code checking
+rdram[0x3B14B0] != 0 sees uninitialized (same as synthPrepend; no
+regression).
+
+Smoke clean: typeABulk count 54→55, listWalker depth 10→9, cb[0]
+fires as the first walker-popped node, zero recover-pc.
+
+**Coverage: 61 of 66 boot callbacks now real.**
+
+Remaining 5 are all blocked by specific constraints:
+- cb[7]  @ 0x3CA350 — 2x jal sub_315B60 (thread/handle allocator);
+  stores return values; NO matrix → typeABulk pattern doesn't apply
+- cb[13] @ 0x3CA780 — clears capA/capB (rdram[0x43AA04]/[0x43FA08])
+  to 0; faithful translation would undo the phase-6 CDVD stub
+- cb[30] @ 0x3CAFA0 — prepender with 4 helper jals
+- cb[31] @ 0x3CAFF0 — prepender with helpers (phase 7 instability)
+- cb[42] @ 0x3CB4A0 — extensive pre/post-matrix state setup; partial
+  loses too much
+
+## [2026-05-24 20:15] SESSION PAUSE — cycle 28 phases 8-14 (10 commits this resume)
+
+Session contributed 5 real translations (cb[0], cb[3], cb[10], cb[45],
+cb[57], cb[62]) plus one significant architectural finding
+([[project-vif1-mark]]).  Net coverage: 57→61 of 66 real callbacks;
+listWalker depth dropped from 15 to 9.
 
 Session footprint:
 - Phase 8 (b083d58): doc-only VIF1_MARK force-engage revert note
