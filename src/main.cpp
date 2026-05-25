@@ -2137,6 +2137,38 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
+    // --- callback[45] @ 0x3CB940 — matrix + 8 trailing words (pure data) ---
+    //
+    // Cycle 28 phase 11.  No helper jal; pure data init.  Writes the
+    // standard 4x4 type-A matrix at rdram[0x443F60..0x443F9F], then 8
+    // trailing scalar words at rdram[0x443FA0..0x443FBC]:
+    //   [+00]=0, [+04]=0, [+08]=0, [+0C]=64 (int),
+    //   [+10]=0, [+14]=-1.0f, [+18]=0, [+1C]=+1.0f
+    runtime.registerFunction(0x3CB940u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        static const float kMatrix[16] = {
+            0.f, 0.f, 0.f, 1.f,
+            1.f, 0.f, 0.f, 1.f,
+            0.f, 1.f, 0.f, 1.f,
+            0.f, 0.f, 1.f, 1.f,
+        };
+        std::memcpy(rdram + 0x443F60u, kMatrix, 64u);
+        *(uint32_t*)(rdram + 0x443FA0u) = 0u;
+        *(uint32_t*)(rdram + 0x443FA4u) = 0u;
+        *(uint32_t*)(rdram + 0x443FA8u) = 0u;
+        *(uint32_t*)(rdram + 0x443FACu) = 64u;
+        *(uint32_t*)(rdram + 0x443FB0u) = 0u;
+        *(uint32_t*)(rdram + 0x443FB4u) = 0xBF800000u; // -1.0f
+        *(uint32_t*)(rdram + 0x443FB8u) = 0u;
+        *(uint32_t*)(rdram + 0x443FBCu) = 0x3F800000u; // +1.0f
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[45] 0x3CB940] matrix+8 written at 0x443F60..0x443FBF\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- callback[57] @ 0x3CBFB0 — pure float reciprocal ---
     //
     // Trivial 8-instruction callback (cycle 28 phase 9):
@@ -2742,6 +2774,7 @@ int main(int argc, char* argv[])
             0x003CA620u, // [11] prepender (matrix + func_299130)
             0x003CA9F0u, // [18] prepender
             0x003CB140u, // [34] prepender
+            0x003CB940u, // [45] matrix+8 trailing words at 0x443F60
             0x003CBFB0u, // [57] pure float reciprocal (1/32767 -> 0x444500)
             0x003CA020u, 0x003CA0A0u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
             0x003CA390u, 0x003CA410u, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
