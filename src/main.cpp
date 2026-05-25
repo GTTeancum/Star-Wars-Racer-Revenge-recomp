@@ -2230,6 +2230,7 @@ int main(int argc, char* argv[])
         static const struct { uint32_t pc, target; } kTypeA[] = {
             {0x003CA020u, 0x00444830u}, // [1]
             {0x003CA0A0u, 0x00444880u}, // [2]
+            {0x003CA120u, 0x00434940u}, // [3] PARTIAL: matrix only; drops jal sub_2E8860($a1=0x262FD0,$a3=8,$s0=4)
             {0x003CA1D0u, 0x00444980u}, // [4]
             {0x003CA250u, 0x004449D0u}, // [5]
             {0x003CA2D0u, 0x00444AE0u}, // [6]
@@ -2776,7 +2777,7 @@ int main(int argc, char* argv[])
             0x003CB140u, // [34] prepender
             0x003CB940u, // [45] matrix+8 trailing words at 0x443F60
             0x003CBFB0u, // [57] pure float reciprocal (1/32767 -> 0x444500)
-            0x003CA020u, 0x003CA0A0u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
+            0x003CA020u, 0x003CA0A0u, 0x003CA120u /*[3] partial*/, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
             0x003CA390u, 0x003CA410u, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
             0x003CA970u, 0x003CAA20u, 0x003CAAA0u, 0x003CAB20u, 0x003CABA0u,
             0x003CAC20u, 0x003CACA0u, 0x003CAD20u, 0x003CADA0u, 0x003CAE20u,
