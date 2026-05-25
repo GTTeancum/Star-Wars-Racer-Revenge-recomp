@@ -145,7 +145,44 @@ VIF1 chain still isn't interpretable without VU1 microcode support.
 This is a no-code-change worklog entry documenting the architectural
 finding for future cycles.
 
-## [2026-05-24 19:30] SESSION PAUSE — cycle 28 phase 10 end (3 commits this resume)
+## [2026-05-24 19:40] Cycle 28 phase 11 — callback[45] translated (pure data, no helper)
+
+**Type:** milestone
+**Cycle:** 28
+**Commit:** f253a6d
+
+Re-decoded cb[45] @ 0x3CB940 in full.  Phase 9's classification ("uses
+$s0 saved register") was misleading — $s0 just holds the constant
+1.0f.  Function has NO helper jal: pure data init.
+
+Writes standard type-A matrix at rdram[0x443F60..0x443F9F] plus 8
+trailing scalars at rdram[0x443FA0..0x443FBC] = {0,0,0,64 (int),0,
+-1.0f,0,+1.0f}.
+
+Smoke clean: listWalker depth 14→13, both cb[45] and cb[57] fire, zero
+recover-pc events.
+
+**Coverage: 57 of 66 boot callbacks now real.**
+
+## [2026-05-24 19:45] SESSION PAUSE — cycle 28 phases 8-11 (5 commits this resume)
+
+Session footprint:
+- Phase 8 (b083d58): doc-only VIF1_MARK force-engage revert note
+- Phase 9 (3c4143d): cb[57] pure float reciprocal
+- WORKLOG (6e31e9c)
+- Phase 10 (9396eca): VIF1_MARK is hardware-set finding + CLAUDE.md update
+- Phase 11 (f253a6d): cb[45] pure data matrix+8 trailing words
+
+Saved two memory entries:
+- project-vif1-mark (architectural finding for future cycles)
+- feedback-helper-call-stability (phase-7 lesson)
+
+Remaining 9 callbacks all involve helper jals (sub_002E8860 or similar)
+and are subject to the phase-7 helper-call instability.  Further
+callback translation requires either solving the stack/ra contract
+mismatch or accepting partial translations that drop the helper effect
+(strictly better than synthPrepend phantom nodes; unclear semantic
+value).
 
 ## [2026-05-24 11:55] SESSION RESUME — cycle 28
 
