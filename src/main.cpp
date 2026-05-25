@@ -2137,6 +2137,29 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
+    // --- callback[31] @ 0x3CAFF0 — static data write only (PARTIAL) ---
+    //
+    // Cycle 28 phase 16.  Full cb[31] does:
+    //   1) jal sub_299130($a0=0x443890)        — helper, return ignored
+    //   2) rdram[0x443898] = 0x3D3910          — static data write
+    //   3) prepend node {fn=0x29E200, data=0x443890} at 0x443878
+    //
+    // We translate only step (2): the helper call is phase-7-unstable
+    // and sub_29E200 (the prepended fn target) is an interior label with
+    // no registered entry point — walker can't dispatch it.  Skipping
+    // (1) and (3) leaves us no worse than synthPrepend (which writes
+    // nothing) and adds the one static data write.
+    runtime.registerFunction(0x3CAFF0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        *(uint32_t*)(rdram + 0x443898u) = 0x003D3910u;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[31] 0x3CAFF0] rdram[0x443898] = 0x003D3910 (PARTIAL — helper+prepend skipped)\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- callback[45] @ 0x3CB940 — matrix + 8 trailing words (pure data) ---
     //
     // Cycle 28 phase 11.  No helper jal; pure data init.  Writes the
@@ -2780,6 +2803,7 @@ int main(int argc, char* argv[])
             0x003CA620u, // [11] prepender (matrix + func_299130)
             0x003CA9F0u, // [18] prepender
             0x003CB140u, // [34] prepender
+            0x003CAFF0u, // [31] partial: static data write only
             0x003CB940u, // [45] matrix+8 trailing words at 0x443F60
             0x003CBFB0u, // [57] pure float reciprocal (1/32767 -> 0x444500)
             0x003CA020u, 0x003CA0A0u, 0x003CA120u /*[3] partial*/, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
