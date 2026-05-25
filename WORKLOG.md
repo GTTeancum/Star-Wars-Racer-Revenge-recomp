@@ -415,7 +415,42 @@ Legacy mode preserved (default `--max-mb 0`); pass `--max-mb 2.0` to
 enable byte-aware split.  Test output deleted to save disk; running
 on the real giant file takes ~5min.
 
-## [2026-05-25 09:50] SESSION PAUSE — cycle 28 phases 8-22 (23 commits this resume)
+## [2026-05-25 10:10] Cycle 28 phase 23 — mega-label root cause: recompiler indirect-jump dispatch
+
+**Type:** result (investigation finding for future chunking work)
+**Cycle:** 28
+
+Investigated why phase 22's byte-aware split hit an 11.5MB floor.
+Top 15 labels by size are all exactly 8.47 MB (240 such labels total).
+
+Peeked inside `label_31ed74` (one of the 8.47 MB labels): 188,963
+lines for a SINGLE MIPS instruction (`div $k1, $t4, $t3` in a delay
+slot).  The recompiler generated a giant inline dispatch table — the
+last 10 lines show `runtime->lookupFunction(jumpTarget)` being called,
+suggesting the megabytes of code above it are a pre-dispatch filter
+covering tens of thousands of possible jump targets.
+
+**Why these labels are huge**: indirect JR/JALR through a register
+whose target the recompiler couldn't statically resolve.  Rather than
+emit just a `lookupFunction` call, the recompiler emits a switch table
+covering every potentially-reachable target.  With ~50k+ targets in
+sub_31D200, the table is enormous.
+
+**Implication for chunking**: cannot subdivide a single label.  To
+push max chunk below 8.47MB requires either:
+- (a) Recompiler change: replace inline dispatch table with a single
+  `lookupFunction` call (eliminates ~50% of total file size)
+- (b) Post-process the .cpp to gut these dispatch tables before splitting
+- (c) Accept 11.5MB floor and rely on clang-cl (already proven to
+  handle this size per cycle 27).
+
+Option (a) is the cleanest long-term fix but requires changes inside
+ps2_recomp itself.  Option (c) is good enough to make the current
+chunking experiment buildable end-to-end.
+
+Doc-only research finding; saved for future infra cycle.
+
+## [2026-05-25 10:15] SESSION PAUSE — cycle 28 phases 8-23 (25 commits this resume)
 
 Concrete forward step toward the [[project-giant-function-blocker]]
 infrastructure: now we know exactly how oversized the chunks are and
