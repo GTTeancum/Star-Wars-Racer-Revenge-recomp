@@ -909,6 +909,25 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 }
             }
 
+            // CYCLE 28 PHASE 8 — VIF1_MARK force-engage experiment (reverted)
+            //
+            // Tried: runtime->memory().writeIORegister(0x10003C30u, 1u);
+            // Result: vif1_frameSubmit DID engage submission, but the chain
+            // in the ring buffer was garbage (ASCII strings + zeros).  The
+            // submit path tried to jalr to addresses like 0x20676e69 (" gni"
+            // = part of "Sending..." debug text from sif_dmaSend buffer).
+            // Cascading recover-pc; reverted.
+            //
+            // Real fix requires understanding why the build leaves garbage
+            // in the ring buffer.  Likely candidates:
+            //   - vif1_buildPacket reads upstream descriptors from gsState
+            //     fields we haven't populated correctly
+            //   - The ring buffer base address differs between the build and
+            //     the submit (build writes to one place, submit reads from
+            //     another)
+            //   - The build is supposed to populate VIF1_MADR / VIF1_TADR
+            //     before MARK fires, and those are still zero/wrong.
+
             // Run the VIF1 DMA submission path (0x251DF0) every frame.
             //
             // The rendering cycle:
