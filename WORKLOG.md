@@ -494,7 +494,42 @@ Next steps (future cycle, not this one):
   reached; bridging that gap is the next concrete task after build
   integration)
 
-## [2026-05-25 16:40] SESSION PAUSE — cycle 28 phases 8-24 (27 commits this resume)
+## [2026-05-25 17:00] Cycle 28 phases 25-26 — fix build_chunks.bat for full compile
+
+**Type:** result (progress on full chunk compile)
+**Cycle:** 28
+**Commits:** 0aad083 (Kernel include), 5f4fd39 (/arch:AVX)
+
+Started full 482-chunk compile in background.  Hit two issues, each
+fixed in the splitter so future regens are clean:
+
+1. **Missing Kernel include**: ps2_stubs.h includes "Stubs/Unimplemented.h"
+   via a path relative to the Kernel lib dir.  Added INC6 =
+   `tools/PS2Recomp/ps2xRuntime/src/lib/Kernel` to the auto-generated
+   build_chunks.bat.
+
+2. **SSE4.1 intrinsics**: every mega-label chunk failed with
+   `_mm_blendv_ps requires target feature 'sse4.1'`.  The PS2_VBLEND
+   macro (used to emulate VU0 vector-blend) hits this intrinsic, and
+   clang-cl's default target is base x86_64.  Added `/arch:AVX` to
+   CLANGFLAGS — covers SSE4.1+.
+
+Build restarted with both fixes applied.  Monitor armed to notify on
+any further failures.
+
+## [2026-05-25 17:10] SESSION PAUSE — cycle 28 phases 8-26 (29 commits this resume)
+
+Background full-chunk compile running (bixt2ft1n).  Expected duration
+~hours.  Notification on failure (filtered to FAILED/error/fatal) or
+completion will arrive in the chat asynchronously.
+
+Session-ending state:
+- All splitter fixes committed to tools/split_giant_function.py
+- Auto-generated build_chunks.bat in src/generated_chunks/ patched
+  with INC6 + /arch:AVX so the in-flight compile uses them
+- Master, chunk_0000, chunk_0019 verified compilable (cycle 28 phase 24)
+- 482-chunk full compile in progress; outcome will determine next
+  cycle's starting point (full integration vs more splitter fixes)
 
 Session-wide arc this resume:
 - Phases 8-18: boot callback subsystem (57→65 of 66 real)
