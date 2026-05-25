@@ -25,6 +25,7 @@ from collections import defaultdict
 DEFAULT_INPUT  = r"C:\Programming\GitHub\Star-Wars-Racer-Revenge-recomp\src\generated\sub_0031D200_0x31d200.cpp"
 DEFAULT_OUTDIR = r"C:\Programming\GitHub\Star-Wars-Racer-Revenge-recomp\src\generated_chunks"
 DEFAULT_CHUNKS = 120
+DEFAULT_MAX_MB = 0.0  # 0 = use --chunks fallback (legacy mode); >0 = byte-aware bin-pack
 
 HEADER = """\
 #include "ps2_runtime_macros.h"
@@ -45,7 +46,11 @@ SWITCH_CASE_RE = re.compile(r'^\s+case 0x([0-9a-fA-F]+)u: goto label_([0-9a-fA-F
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--chunks",  type=int, default=DEFAULT_CHUNKS)
+    p.add_argument("--chunks",  type=int, default=DEFAULT_CHUNKS,
+                   help="Target chunk count (used when --max-mb is 0)")
+    p.add_argument("--max-mb",  type=float, default=DEFAULT_MAX_MB,
+                   help="Max chunk size in MB (byte-aware bin-pack mode). "
+                        "0 = use --chunks fallback (legacy label-count split).")
     p.add_argument("--input",   default=DEFAULT_INPUT)
     p.add_argument("--outdir",  default=DEFAULT_OUTDIR)
     return p.parse_args()
@@ -61,16 +66,20 @@ def main():
     # ------------------------------------------------------------------
     # Pass 1: collect all label definitions and original switch-table cases
     # ------------------------------------------------------------------
-    print("[split] Pass 1: scanning labels and switch table ...", flush=True)
+    print("[split] Pass 1: scanning labels, switch table, and per-label byte size ...", flush=True)
 
     label_order  = []          # list of hex strings in file order
     switch_cases = {}          # original switch: pc_hex -> lbl_hex
     switch_end_line = None
+    label_bytes  = {}          # lbl_hex -> bytes of the label body (incl. header line)
 
     with open(args.input, "r", encoding="utf-8", errors="replace") as f:
         in_switch = False
+        current_label = None
+        current_bytes = 0
         for lineno, line in enumerate(f, 1):
             stripped = line.strip()
+            line_size = len(line.encode("utf-8", errors="replace"))
 
             if not in_switch and "switch (ctx->pc)" in line:
                 in_switch = True
@@ -85,31 +94,75 @@ def main():
                     in_switch = False
                 continue
 
-            # Only collect label definitions AFTER the switch
+            # AFTER the switch: track labels + per-label byte size
             if switch_end_line is not None:
                 if line and line[0] not in (' ', '\t', '\r', '\n', '}'):
                     m = LABEL_DEF_RE.match(stripped)
                     if m:
-                        label_order.append(m.group(1).lower())
+                        # Close previous label tally
+                        if current_label is not None:
+                            label_bytes[current_label] = current_bytes
+                        current_label = m.group(1).lower()
+                        current_bytes = line_size
+                        label_order.append(current_label)
+                        continue
+                # Any line within a label body (indented code, blank lines, etc.)
+                if current_label is not None:
+                    current_bytes += line_size
+        # Close the final label
+        if current_label is not None:
+            label_bytes[current_label] = current_bytes
 
     n_labels = len(label_order)
-    print(f"[split] Found {n_labels} labels, {len(switch_cases)} switch cases, switch ends at line {switch_end_line}")
+    total_bytes = sum(label_bytes.values())
+    print(f"[split] Found {n_labels} labels, {len(switch_cases)} switch cases, "
+          f"switch ends at line {switch_end_line}")
+    print(f"[split] Total label-body bytes: {total_bytes/1024/1024:.1f} MB")
 
     # ------------------------------------------------------------------
     # Assign labels to chunks
+    #
+    # Two modes:
+    #   --max-mb > 0 (byte-aware bin-pack): walk labels in file order,
+    #     accumulate byte size, start a new chunk when adding the next
+    #     label would exceed max bytes.  Produces evenly-sized chunks
+    #     regardless of how bytes-per-label varies (1000x in practice).
+    #   --max-mb == 0 (legacy): split by label count into args.chunks
+    #     bins of equal label count.  Bimodal output — some chunks
+    #     <500KB, some >100MB.
     # ------------------------------------------------------------------
-    n_chunks = args.chunks
-    chunk_size = max(1, (n_labels + n_chunks - 1) // n_chunks)
-
     label_to_chunk = {}
     label_to_addr  = {}
-    for idx, lbl in enumerate(label_order):
-        chunk_id = idx // chunk_size
-        label_to_chunk[lbl] = chunk_id
-        label_to_addr[lbl]  = int(lbl, 16)
 
-    actual_chunks = max(label_to_chunk.values()) + 1 if label_to_chunk else 0
-    print(f"[split] Assigning {n_labels} labels -> {actual_chunks} chunks (target {n_chunks})")
+    if args.max_mb > 0.0:
+        max_bytes = int(args.max_mb * 1024 * 1024)
+        print(f"[split] Mode: byte-aware bin-pack (max chunk size {args.max_mb:.1f} MB)")
+        chunk_id = 0
+        current_chunk_bytes = 0
+        for lbl in label_order:
+            lbl_size = label_bytes.get(lbl, 0)
+            # If adding this label would exceed max AND the current chunk
+            # is non-empty, start a new chunk.  (Always allow the first
+            # label into a fresh chunk, even if it alone exceeds max — we
+            # can't split a single label.)
+            if current_chunk_bytes > 0 and current_chunk_bytes + lbl_size > max_bytes:
+                chunk_id += 1
+                current_chunk_bytes = 0
+            label_to_chunk[lbl] = chunk_id
+            label_to_addr[lbl]  = int(lbl, 16)
+            current_chunk_bytes += lbl_size
+        actual_chunks = chunk_id + 1
+        print(f"[split] Bin-packed {n_labels} labels -> {actual_chunks} chunks")
+    else:
+        n_chunks = args.chunks
+        chunk_size = max(1, (n_labels + n_chunks - 1) // n_chunks)
+        print(f"[split] Mode: legacy label-count split (target {n_chunks} chunks)")
+        for idx, lbl in enumerate(label_order):
+            chunk_id = idx // chunk_size
+            label_to_chunk[lbl] = chunk_id
+            label_to_addr[lbl]  = int(lbl, 16)
+        actual_chunks = max(label_to_chunk.values()) + 1 if label_to_chunk else 0
+        print(f"[split] Assigning {n_labels} labels -> {actual_chunks} chunks (target {n_chunks})")
 
     # Group ALL labels by chunk (for the chunk's switch table)
     chunk_labels = defaultdict(list)   # chunk_id -> [lbl_hex, ...]
