@@ -2137,6 +2137,33 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
+    // --- callback[57] @ 0x3CBFB0 — pure float reciprocal ---
+    //
+    // Trivial 8-instruction callback (cycle 28 phase 9):
+    //   lwc1 $f0, 0x3640(0x0038_0000)   ; load float at rdram[0x383640]
+    //   lui  $v1, 0x3F80                ; $v1 = bits(1.0f)
+    //   mtc1 $v1, $f1                   ; $f1 = 1.0f
+    //   div.s $f0, $f1, $f0             ; $f0 = 1.0f / $f0
+    //   swc1 $f0, 0x4500(0x0044_0000)   ; rdram[0x444500] = 1.0f / rdram[0x383640]
+    //
+    // ELF data at 0x383640 = 0x46FFFE00 = 32767.0f → result ≈ 3.0518e-5f.
+    // No calls, no stack churn, no helper-call instability risk.  Faithfully
+    // translated by reading rdram at runtime in case 0x383640 is rewritten
+    // (it isn't, but this matches MIPS semantics exactly).
+    runtime.registerFunction(0x3CBFB0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        const float src = *(const float*)(rdram + 0x383640u);
+        const float result = 1.0f / src;
+        *(float*)(rdram + 0x444500u) = result;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[57] 0x3CBFB0] rdram[0x444500] = 1.0/%.6f = %.9f\n",
+                   src, result);
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- Boot-callback hand-translations (cycle 28 phase 2-3) ---
     //
     // The 66-entry boot-init callback array at 0x3CC548..0x3CC650 dispatches
@@ -2715,6 +2742,7 @@ int main(int argc, char* argv[])
             0x003CA620u, // [11] prepender (matrix + func_299130)
             0x003CA9F0u, // [18] prepender
             0x003CB140u, // [34] prepender
+            0x003CBFB0u, // [57] pure float reciprocal (1/32767 -> 0x444500)
             0x003CA020u, 0x003CA0A0u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
             0x003CA390u, 0x003CA410u, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
             0x003CA970u, 0x003CAA20u, 0x003CAAA0u, 0x003CAB20u, 0x003CABA0u,
