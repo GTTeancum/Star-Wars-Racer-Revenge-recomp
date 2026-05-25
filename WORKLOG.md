@@ -304,7 +304,35 @@ phase 6) AND a solution to the phase-7 helper-call stack contract
 issue (the 4 helper jals before the prepend cannot run safely from
 C++).  Genuine multi-phase infrastructure work, not a partial.
 
-## [2026-05-25 00:40] SESSION PAUSE — cycle 28 phases 8-18 (17 commits this resume)
+## [2026-05-25 00:55] Cycle 28 phase 19 — CLAUDE.md correction (sub_2F57C0 is syscall)
+
+**Type:** blocker-resolved (false-positive removed from docs)
+**Cycle:** 28
+**Commit:** d82854a
+
+Investigated post-callback execution flow looking for a new blocker.
+Found that CLAUDE.md's claim that func_2F57C0 is "an interior label
+inside sub_002F5538 (TODO_NAMED stub)" is incorrect.
+
+Actual: 0x2F57C0 is a standalone 4-instruction syscall wrapper for
+syscall #4 (ExitThread).  The 0x2F57C0..0x2F582x range contains a
+table of thin syscall stubs.
+
+So when _start's tail-call ladder reaches func_2F57C0, the intent is
+to ExitThread on Thread-0 and let other threads drive frames.  Our
+runtime already handles this correctly via the 60s-sleep stub at
+0x2FEA30 (main.cpp:1811).  Thread-0 parking at 0x1000AC is by design,
+not a blocker.
+
+State[6] non-advancement is unrelated to ExitThread; it's the
+still-missing SIF/IOP layer that would write rdram[0x44E018].
+
+## [2026-05-25 01:00] SESSION PAUSE — cycle 28 phases 8-19 (19 commits this resume)
+
+Final session contribution: 65/66 boot callbacks translated, listWalker
+depth 15→5, VIF1_MARK architectural finding documented, ExitThread
+misattribution corrected.  Zero recover-pc regressions across 19
+commits.
 
 End state: 65 of 66 boot callbacks translated.  listWalker depth at
 5 (down from 15 at start of resume).  Stable plateau preserved
