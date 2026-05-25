@@ -358,7 +358,37 @@ Saved [[project-giant-function-blocker]] as a memory entry so future
 sessions don't repeat callback-translation work expecting downstream
 benefit.
 
-## [2026-05-25 09:00] SESSION PAUSE — cycle 28 phases 8-20 (21 commits this resume)
+## [2026-05-25 09:15] Cycle 28 phase 21 — measure chunking distribution
+
+**Type:** result
+**Cycle:** 28
+
+Wrote `tools/measure_chunks.py` and ran against the existing
+`src/generated_chunks/` directory from cycle 27.
+
+Distribution of the 120 chunks (total 2766 MB):
+- **57 chunks ≤ 500KB** (47% — trivially compilable)
+- **0 chunks** in the 500KB–5MB range
+- **41 chunks ≤ 50MB**
+- **22 chunks > 50MB** (largest: 103MB)
+
+**Oversized at MSVC's ~2MB ceiling: 63 of 120 (52%).**
+
+The current splitter divides by LABEL COUNT in file order, so chunks
+become bimodal: regions with many small labels produce tiny chunks;
+regions with a few large labels produce huge ones.  Fix: byte-aware
+greedy bin-packing.  Target chunk size 2MB → ~1400 chunks total.
+
+Doc-only artifact: a measurement tool to make future chunking-fix work
+verifiable.  Run `python tools/measure_chunks.py` before/after any
+splitter change to confirm distribution improvement.
+
+## [2026-05-25 09:20] SESSION PAUSE — cycle 28 phases 8-21 (22 commits this resume)
+
+Concrete forward step toward the [[project-giant-function-blocker]]
+infrastructure: now we know exactly how oversized the chunks are and
+have a tool to verify improvements.  The actual splitter fix is the
+next session's work.
 
 Truly the final phase.  The boot-callback / module-state subsystem is
 exhausted: 65/66 done, the remaining one (cb[30]) needs infrastructure,
