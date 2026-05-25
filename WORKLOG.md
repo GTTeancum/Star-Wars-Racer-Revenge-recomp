@@ -383,7 +383,39 @@ Doc-only artifact: a measurement tool to make future chunking-fix work
 verifiable.  Run `python tools/measure_chunks.py` before/after any
 splitter change to confirm distribution improvement.
 
-## [2026-05-25 09:20] SESSION PAUSE — cycle 28 phases 8-21 (22 commits this resume)
+## [2026-05-25 09:45] Cycle 28 phase 22 — splitter byte-aware bin-pack
+
+**Type:** milestone
+**Cycle:** 28
+**Commit:** 6ebf788
+
+Added `--max-mb` mode to `tools/split_giant_function.py`.  Measures
+byte size per label during pass 1, then walks labels in file order
+greedy-bin-packing into chunks of <= max_bytes each.
+
+Tested with `--max-mb 2.0` on the 2.2GB sub_0031D200_0x31d200.cpp:
+
+| Metric | Legacy mode | Byte-aware (--max-mb 2.0) |
+|---|---|---|
+| Chunk count | 120 | 482 |
+| Largest chunk | 103 MB | 11.5 MB |
+| Chunks > 50MB | 22 (18%) | 0 |
+| Oversized vs 2MB | 63 (52%) | 242 (50%) |
+
+**Max chunk size dropped 9x.**  The 11.5MB floor is set by individual
+mega-labels (each containing a single 13,882-case switch table);
+splitter can't subdivide a single label without changing strategy.
+
+**Practical effect**: clang-cl was already compiling 24MB chunks per
+cycle 27 (CLAUDE.md note re chunk_0010).  With max now 11.5MB, ALL
+482 chunks should be clang-cl-compilable.  Concrete forward step
+toward unblocking [[project-giant-function-blocker]].
+
+Legacy mode preserved (default `--max-mb 0`); pass `--max-mb 2.0` to
+enable byte-aware split.  Test output deleted to save disk; running
+on the real giant file takes ~5min.
+
+## [2026-05-25 09:50] SESSION PAUSE — cycle 28 phases 8-22 (23 commits this resume)
 
 Concrete forward step toward the [[project-giant-function-blocker]]
 infrastructure: now we know exactly how oversized the chunks are and
