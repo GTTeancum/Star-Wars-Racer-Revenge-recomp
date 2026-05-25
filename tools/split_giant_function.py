@@ -332,6 +332,10 @@ def main():
     incdir3 = rf"{project_root}\include"
     incdir4 = rf"{project_root}\build\_deps\raylib-src\src"
     incdir5 = rf"{project_root}\build\_deps\raylib-src\src\external\glfw\include"
+    # ps2_stubs.h includes "Stubs/Unimplemented.h" via a path relative to
+    # the Kernel lib dir.  Without this include path, clang-cl fails on
+    # every chunk.
+    incdir6 = rf"{project_root}\tools\PS2Recomp\ps2xRuntime\src\lib\Kernel"
     outdir_obj = rf"{project_root}\src\clang_objs"
 
     with open(bat_path, "w", encoding="utf-8") as bf:
@@ -346,12 +350,13 @@ def main():
         bf.write(f'set INC3={incdir3}\n')
         bf.write(f'set INC4={incdir4}\n')
         bf.write(f'set INC5={incdir5}\n')
+        bf.write(f'set INC6={incdir6}\n')
         bf.write(f'set INCCHUNKS={args.outdir}\n\n')
         bf.write('if not exist "%OUTDIR%" mkdir "%OUTDIR%"\n\n')
         bf.write("echo Compiling sub_0031D200 chunks with clang-cl...\n")
         bf.write("set FAILED=0\n\n")
         bf.write('set CLANGFLAGS=/c /Od /bigobj /std:c++20 /EHsc /MD\n')
-        bf.write('set INCLUDES=-I"%INC1%" -I"%INC2%" -I"%INC3%" -I"%INC4%" -I"%INC5%" -I"%INCCHUNKS%"\n\n')
+        bf.write('set INCLUDES=-I"%INC1%" -I"%INC2%" -I"%INC3%" -I"%INC4%" -I"%INC5%" -I"%INC6%" -I"%INCCHUNKS%"\n\n')
         bf.write("echo   Compiling master dispatcher...\n")
         bf.write(f'clang-cl %CLANGFLAGS% %INCLUDES% -Fo"%OUTDIR%\\sub_0031D200_0x31d200.obj" "%SRCDIR%\\sub_0031D200_0x31d200.cpp"\n')
         bf.write("if errorlevel 1 (echo   FAILED: master & set FAILED=1)\n\n")
