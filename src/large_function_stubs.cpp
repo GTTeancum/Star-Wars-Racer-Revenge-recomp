@@ -25,12 +25,15 @@ MAKE_STUB(entry_2a3c80_0x2a4b70)
 MAKE_STUB(sub_001BA130_0x1ba130)
 // sub_0031D200_0x31d200 — game logic state machine (748KB, 55627 labels).
 //
-// When chunk .obj files are available (compiled via build_chunks_parallel.py),
-// CMakeLists replaces this with the master dispatcher + 120 compiled chunks.
-// Until then, we fall back to the MIPS interpreter reading opcodes from rdram.
-// The interpreter dispatches JAL/JALR to the recompiled function table, so all
+// When chunk .obj files are available (compiled via build_chunks.bat),
+// CMakeLists defines D200_CHUNKS_AVAILABLE and adds the master dispatcher
+// from src/generated_chunks/sub_0031D200_0x31d200.cpp.  Until then, we fall
+// back to the MIPS interpreter reading opcodes from rdram.
+//
+// The interpreter dispatches JAL/JALR to the recompiled function table, so
 // OTHER compiled functions are called at native speed — only the scaffolding
 // code within sub_0031D200 itself is interpreted.
+#ifndef D200_CHUNKS_AVAILABLE
 void sub_0031D200_0x31d200(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
 {
     static std::atomic<uint64_t> s_calls{0};
@@ -41,6 +44,7 @@ void sub_0031D200_0x31d200(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtim
     }
     interpretMipsKseg0(rdram, ctx, runtime, ctx->pc);
 }
+#endif
 // entry_31d280_0x3d5a00 — interior label within sub_0031D200, handled by master dispatcher
 // (when chunks are compiled the master dispatcher handles all 558 entry points)
 
