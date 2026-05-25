@@ -58,7 +58,8 @@ if(EXISTS "${CHUNK_MASTER}" AND D200_CHUNK_OBJS)
     # Tell large_function_stubs.cpp to skip its sub_0031D200_0x31d200
     # interpreter fallback — the master dispatcher provides it instead.
     add_compile_definitions(D200_CHUNKS_AVAILABLE)
-    message(STATUS "Including sub_0031D200 master dispatcher (${list_length D200_CHUNK_OBJS} chunk .obj files)")
+    list(LENGTH D200_CHUNK_OBJS D200_CHUNK_OBJS_COUNT)
+    message(STATUS "Including sub_0031D200 master dispatcher (${D200_CHUNK_OBJS_COUNT} chunk .obj files)")
 else()
     message(STATUS "sub_0031D200 chunks not yet compiled -- interpreter stub active (run build_chunks_parallel.py)")
 endif()
