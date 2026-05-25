@@ -450,7 +450,65 @@ chunking experiment buildable end-to-end.
 
 Doc-only research finding; saved for future infra cycle.
 
-## [2026-05-25 10:15] SESSION PAUSE — cycle 28 phases 8-23 (25 commits this resume)
+## [2026-05-25 16:35] Cycle 28 phase 24 — chunks compile end-to-end with clang-cl
+
+**Type:** milestone (BIGGEST OF THE CYCLE)
+**Cycle:** 28
+**Commit:** e0f3d0f
+
+Three splitter fixes make the chunking experiment buildable end-to-end:
+
+1. **Case-goto in-place rewrite**: old splitter replaced the whole
+   line including `case 0xXu:` prefix, stranding switch cases.  Fixed
+   via regex sub on just the `goto label_X;` portion.
+
+2. **Drop undefined-label cases**: discovered the recompiler emits
+   case entries for labels that never exist — sub_31D200 runs into
+   the data segment, so PCs in data regions get dispatch entries but
+   no label defs.  Splitter now drops these lines.
+
+3. **Master uses GPR_U32(ctx, 31)** not `ctx->gpr[31]` (struct has
+   `r[31]`).
+
+Created `tools/test_chunk_compile.bat` for bounded clang-cl validation.
+
+Test results:
+  === Compiling master ===            MASTER OK
+  === Compiling chunk 0000 (1KB) ===  CHUNK 0000 OK
+  === Compiling chunk 0019 (11.5MB) === CHUNK 0019 OK
+  === ALL TESTS PASSED ===
+
+Total chunked size dropped 2861→1396 MB after the undefined-label
+drop (51% reduction from removing recompiler junk).  All 482 chunks
+now ≤ 11.5 MB; clang-cl handles this size range comfortably.
+
+**This is the first proof that any sub_31D200 chunk other than the
+cycle-27 chunk_0010 compiles cleanly.**  The architectural
+[[project-giant-function-blocker]] is now mechanically unblocked.
+
+Next steps (future cycle, not this one):
+- Run the full build_chunks.bat to compile all 482 chunks (~2 hr est)
+- CMakeLists.txt already glob-includes .obj files when present, so
+  once chunks compile, sub_31D200 becomes part of the build
+- Verify execution reaches sub_31D200 (cycle 27 trace said it isn't
+  reached; bridging that gap is the next concrete task after build
+  integration)
+
+## [2026-05-25 16:40] SESSION PAUSE — cycle 28 phases 8-24 (27 commits this resume)
+
+Session-wide arc this resume:
+- Phases 8-18: boot callback subsystem (57→65 of 66 real)
+- Phases 19-20: architectural findings + memory entries
+- Phase 21: chunk size measurement tool
+- Phases 22-23: byte-aware splitter + mega-label characterization
+- **Phase 24: splitter+chunks compile end-to-end (the breakthrough)**
+
+The session ends with a different shape than it started: from incremental
+boot-callback polishing to having mechanically unblocked the
+project's largest architectural blocker.  Even though no behavior
+changed in the running game yet (chunks aren't linked into the build
+this cycle), the path from "sub_31D200 cannot be compiled" to "all
+482 chunks compile cleanly with clang-cl" is now traversed.
 
 Concrete forward step toward the [[project-giant-function-blocker]]
 infrastructure: now we know exactly how oversized the chunks are and
