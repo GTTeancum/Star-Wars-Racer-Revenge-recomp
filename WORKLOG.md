@@ -327,7 +327,43 @@ not a blocker.
 State[6] non-advancement is unrelated to ExitThread; it's the
 still-missing SIF/IOP layer that would write rdram[0x44E018].
 
-## [2026-05-25 01:00] SESSION PAUSE — cycle 28 phases 8-19 (19 commits this resume)
+## [2026-05-25 08:55] Cycle 28 phase 20 — architectural black hole: sub_31D200 is the only modTable[0] consumer
+
+**Type:** blocker-resolved (architectural finding documented)
+**Cycle:** 28
+**Commit:** (CLAUDE.md update — single doc commit)
+
+While investigating what state transitions remain blocked, captured a
+StateDump from a fresh run.  Result: ONLY module [6] has any populated
+state slot.  All other 31 slots are 0.  After module 6 reaches "done"
+(0xFFFFFFFF), the module-manager iteration writes 22 to modTable[0]
+(rdram[0x385160]).
+
+Grep for `0x385160` across `src/generated/`: **ZERO hits except inside
+sub_0031D200_0x31d200.cpp** (the giant 748KB game-logic function
+deliberately excluded from build).
+
+So the entire callback / module / state-machine infrastructure feeds
+data into a function that does not exist in our binary.  All 65 boot
+callbacks, module 6 reaching done, and any future state-machine work
+have no downstream consumer.
+
+**Implication**: the only way to make game-state progress past the
+current plateau (state=0x251B10 forever) is to compile sub_31D200.
+The chunking experiment from cycle 27 produces 120 sub-MB chunks and
+one 24MB chunk_0000 that still needs further splitting.
+
+Updated CLAUDE.md "Giant function" section with this analysis.
+Saved [[project-giant-function-blocker]] as a memory entry so future
+sessions don't repeat callback-translation work expecting downstream
+benefit.
+
+## [2026-05-25 09:00] SESSION PAUSE — cycle 28 phases 8-20 (21 commits this resume)
+
+Truly the final phase.  The boot-callback / module-state subsystem is
+exhausted: 65/66 done, the remaining one (cb[30]) needs infrastructure,
+and any further state-machine work without sub_31D200 compiled is
+chasing symptoms instead of causes.
 
 Final session contribution: 65/66 boot callbacks translated, listWalker
 depth 15→5, VIF1_MARK architectural finding documented, ExitThread

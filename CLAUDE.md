@@ -105,6 +105,17 @@ See `CMakeLists.txt` EXCLUDE_LARGE_FILES and `src/large_function_stubs.cpp`.
 Analyzer treats 0x31D200–0x3D5A00 (748KB) as one function. Likely runs into data segment.
 Skipped in TOML — generates 2.1GB C++ output otherwise.
 
+**Why sub_31D200 is the architectural game-logic black hole** (cycle 28 phase 20 finding):
+The full callback / module-manager / state-machine chain that we've been progressively unblocking has a single ultimate destination — sub_31D200 is the ONLY consumer of `modTable[0]` (rdram[0x385160]). When module 6 reaches "done", it writes 22 to modTable[0]; sub_31D200 reads that and dispatches game logic. With sub_31D200 excluded:
+- All 65 hand-translated boot callbacks set up data that has no downstream consumer
+- Module 6 reaching "done" has no observable effect
+- The state-machine plateau (state=0x251B10 forever) cannot break
+- No game-logic state transitions can ever occur
+
+This means **getting visible gameplay content requires sub_31D200 to be compiled** — either via the existing chunking experiment (`tools/split_giant_function.py` + `tools/build_chunks_parallel.py`, see cycle 27 worklog) or by reverse-engineering chunks of the function into hand-translated C++ overrides. The chunking experiment produces one 24MB chunk_0000 + ~120 sub-MB chunks; only chunk_0010 compiled cleanly with clang-cl as of cycle 27. This is multi-cycle infrastructure work.
+
+Even if the call chain leading INTO sub_31D200 isn't currently exercised (cycle 27 trace confirmed it isn't reached from the main loop), getting sub_31D200 compiled is a prerequisite — without it, no progress past the current plateau is possible.
+
 ## Key ELF Functions (discovered via runtime tracing and Ghidra analysis)
 
 ### Boot Sequence
