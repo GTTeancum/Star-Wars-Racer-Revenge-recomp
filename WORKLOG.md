@@ -283,7 +283,33 @@ Final 2 require infrastructure (not the partial pattern):
 - cb[7]  — needs handle-allocator stub
 - cb[30] — needs inject_extra_entry_points.py + helper-contract solve
 
-## [2026-05-25 00:25] SESSION PAUSE — cycle 28 phases 8-17 (15 commits this resume)
+## [2026-05-25 00:35] Cycle 28 phase 18 — cb[7] no-op stub
+
+**Type:** milestone
+**Cycle:** 28
+**Commit:** 3cac856
+
+Override for cb[7] stores zeros to its 3 handle slots — equivalent to
+sub_315B60's failure path.  Semantically a no-op (memory was already
+zero) but removes the phantom synthPrepend node and documents the
+absence of a thread/handle subsystem.
+
+Smoke: depth 6→5, capA=capB=0x100 preserved, zero recover-pc.
+
+**Coverage: 65 of 66 boot callbacks now real.**
+
+Only cb[30] remains.  Needs both inject_extra_entry_points.py to
+register fn target 0x29F190 (similar to cb[34]'s 0x2A3180 unblock from
+phase 6) AND a solution to the phase-7 helper-call stack contract
+issue (the 4 helper jals before the prepend cannot run safely from
+C++).  Genuine multi-phase infrastructure work, not a partial.
+
+## [2026-05-25 00:40] SESSION PAUSE — cycle 28 phases 8-18 (17 commits this resume)
+
+End state: 65 of 66 boot callbacks translated.  listWalker depth at
+5 (down from 15 at start of resume).  Stable plateau preserved
+throughout — game_state_fn=0x251B10, capA=capB=0x100 (CDVD stub),
+vif1Idx incrementing, zero recover-pc regressions.  17 commits clean.
 
 Session-wide stats:
 - 13 commits total (8 cb-translation phases, 1 architectural finding,
