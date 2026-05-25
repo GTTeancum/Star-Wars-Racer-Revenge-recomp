@@ -2137,6 +2137,38 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
+    // --- callback[7] @ 0x3CA350 — handle-allocator stub (no-op semantic) ---
+    //
+    // Cycle 28 phase 18.  Full cb[7] does:
+    //   $v0a = sub_315B60(\$a0=undefined-from-walker)
+    //   $v0b = sub_315B60(\$a0=1)
+    //   rdram[0x435340] = $v0a   ; first thread handle
+    //   rdram[0x435344] = $v0b   ; second thread handle
+    //   rdram[0x435348] = 0
+    //
+    // sub_315B60 wraps sub_2F8D30 (full thread-create with 192-byte
+    // stack frame and 60+ register/state setups).  Calling it from C++
+    // via lookupFunction risks the phase-7 helper-call instability.
+    //
+    // Equivalent to the failure path (sub_315B60 returning 0), which
+    // matches the runtime's zero-initialized state.  This override is
+    // semantically identical to synthPrepend (which also does nothing
+    // useful for this callback) but removes the phantom list node and
+    // documents the intent — providing non-zero "valid" handles would
+    // require a synthetic thread subsystem we don't have.
+    runtime.registerFunction(0x3CA350u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        *(uint32_t*)(rdram + 0x435340u) = 0u;
+        *(uint32_t*)(rdram + 0x435344u) = 0u;
+        *(uint32_t*)(rdram + 0x435348u) = 0u;
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[7] 0x3CA350] handle slots cleared (no thread subsystem)\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- callback[13] @ 0x3CA780 — CDVD-stub-aware partial ---
     //
     // Cycle 28 phase 17.  Full cb[13] does:
@@ -2835,6 +2867,7 @@ int main(int argc, char* argv[])
             0x003CA620u, // [11] prepender (matrix + func_299130)
             0x003CA9F0u, // [18] prepender
             0x003CB140u, // [34] prepender
+            0x003CA350u, // [7]  no-op: handle-allocator stub (zeros to slots, equivalent to alloc failure)
             0x003CA780u, // [13] partial: CDVD-stub-aware (skips capA/capB clears)
             0x003CAFF0u, // [31] partial: static data write only
             0x003CB940u, // [45] matrix+8 trailing words at 0x443F60
