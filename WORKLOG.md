@@ -540,7 +540,48 @@ away once the chunks complete.
 
 Build progress at this entry: 211/482 chunks compiled, zero failures.
 
-## [2026-05-25 17:30] SESSION PAUSE — cycle 28 phases 8-27 (31 commits this resume)
+## [2026-05-25 17:55] Cycle 28 phase 28 — recompiler-bug post-processor; all 482 chunks compile
+
+**Type:** MILESTONE (chunks compile end-to-end)
+**Cycle:** 28
+**Commit:** 4a0332e
+
+Full 482-chunk compile completed with 4 failures.  Two distinct
+recompiler bugs:
+
+1. **ERET pattern missing `} else { ... }`** — 3 chunks (0264, 0452,
+   0464).  ps2_recomp generates the cop0-state-restore for `eret`
+   without the else branch.
+2. **Source file truncation** — chunk 0481.  The 2.2GB
+   sub_0031D200_0x31d200.cpp itself is truncated mid-line at
+   `case 0x35B750u: goto lab`; ps2_recomp ran out of resources during
+   generation.
+
+Wrote `tools/fix_chunk_recompiler_bugs.py` to detect both patterns
+and patch the affected chunks (eret regex sub; truncation: drop the
+partial line and count brace depth to add the right number of
+closing braces).  Plus `tools/test_chunk_compile_failures.bat` for
+quick re-verification.
+
+After the post-processor: **all 482 chunks + master compile cleanly
+with clang-cl.**
+
+CMake re-configured and now reports:
+  "Including sub_0031D200 master dispatcher (482 chunk .obj files)"
+
+Build with chunks integrated kicked off (task bw3rn821d); link step
+takes longer than usual with 482 .obj files.  Monitor armed (task
+bzwdaq2h5) to notify on errors or completion.
+
+## [2026-05-25 17:58] SESSION PAUSE — cycle 28 phases 8-28 (32 commits this resume)
+
+Outcome of the in-flight CMake build determines next session's pickup:
+- If link succeeds: sub_0031D200 is INCLUDED in the binary for the
+  first time ever.  Next: verify runtime behavior — does the game
+  state machine now advance past the plateau?
+- If link fails: probably more symbol conflicts to resolve (the
+  preflight fix in phase 27 covered the master, but chunks may
+  define other conflicting symbols).
 
 Background full-chunk compile running (bixt2ft1n).  Expected duration
 ~hours.  Notification on failure (filtered to FAILED/error/fatal) or
