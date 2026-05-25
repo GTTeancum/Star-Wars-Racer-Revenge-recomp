@@ -2236,6 +2236,7 @@ int main(int argc, char* argv[])
             {0x003CA2D0u, 0x00444AE0u}, // [6]
             {0x003CA390u, 0x004453A0u}, // [8]
             {0x003CA410u, 0x004454B0u}, // [9]
+            {0x003CA490u, 0x004355C0u}, // [10] PARTIAL: matrix only; drops 2x jal 0x164AA0 + state-dep code
             {0x003CA7F0u, 0x00442DD0u}, // [14]
             {0x003CA870u, 0x00442F00u}, // [15]
             {0x003CA8F0u, 0x00442F80u}, // [16]
@@ -2277,6 +2278,7 @@ int main(int argc, char* argv[])
             {0x003CC060u, 0x00444560u}, // [59]
             {0x003CC0E0u, 0x00444630u}, // [60]
             {0x003CC160u, 0x00444680u}, // [61]
+            {0x003CC1E0u, 0x00444720u}, // [62] PARTIAL: matrix only; drops 3x jal sub_2E8860
             {0x003CC2D0u, 0x00446770u}, // [63]
             {0x003CC350u, 0x00446800u}, // [64]
             {0x003CC3D0u, 0x00446A40u}, // [65]
@@ -2778,7 +2780,7 @@ int main(int argc, char* argv[])
             0x003CB940u, // [45] matrix+8 trailing words at 0x443F60
             0x003CBFB0u, // [57] pure float reciprocal (1/32767 -> 0x444500)
             0x003CA020u, 0x003CA0A0u, 0x003CA120u /*[3] partial*/, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
-            0x003CA390u, 0x003CA410u, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
+            0x003CA390u, 0x003CA410u, 0x003CA490u /*[10] partial*/, 0x003CA7F0u, 0x003CA870u, 0x003CA8F0u,
             0x003CA970u, 0x003CAA20u, 0x003CAAA0u, 0x003CAB20u, 0x003CABA0u,
             0x003CAC20u, 0x003CACA0u, 0x003CAD20u, 0x003CADA0u, 0x003CAE20u,
             0x003CAEA0u, 0x003CAF20u, 0x003CB040u, 0x003CB0C0u, 0x003CB170u,
@@ -2786,7 +2788,7 @@ int main(int argc, char* argv[])
             0x003CB400u, 0x003CB790u, 0x003CB8C0u, 0x003CBA10u, 0x003CBAB0u,
             0x003CBB30u, 0x003CBBB0u, 0x003CBC30u, 0x003CBCB0u, 0x003CBD30u,
             0x003CBDB0u, 0x003CBE30u, 0x003CBEB0u, 0x003CBF30u, 0x003CBFE0u,
-            0x003CC060u, 0x003CC0E0u, 0x003CC160u, 0x003CC2D0u, 0x003CC350u,
+            0x003CC060u, 0x003CC0E0u, 0x003CC160u, 0x003CC1E0u /*[62] partial*/, 0x003CC2D0u, 0x003CC350u,
             0x003CC3D0u,
         };
         static std::unordered_set<uint32_t> s_skip(std::begin(kSkipPcs), std::end(kSkipPcs));
