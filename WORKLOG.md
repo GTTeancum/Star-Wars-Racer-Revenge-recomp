@@ -164,7 +164,39 @@ recover-pc events.
 
 **Coverage: 57 of 66 boot callbacks now real.**
 
-## [2026-05-24 19:45] SESSION PAUSE — cycle 28 phases 8-11 (5 commits this resume)
+## [2026-05-24 19:55] Cycle 28 phases 12-13 — partial translations (cb[3], cb[10], cb[62])
+
+**Type:** milestone
+**Cycle:** 28
+**Commits:** 090116f (cb[3]), 4b63950 (cb[10] + cb[62])
+
+Applied the partial-translation pattern from
+[[feedback-helper-call-stability]]: for callbacks with a matrix-write
+followed by a helper jal, add the matrix target to typeABulk and drop
+the helper.  Strictly better than synthPrepend phantom nodes; helper
+effect is missed but documented per-entry.
+
+Added to typeABulk:
+- cb[3] @ 0x3CA120 → 0x434940
+- cb[10] @ 0x3CA490 → 0x4355C0
+- cb[62] @ 0x3CC1E0 → 0x444720
+
+Skipped:
+- cb[42] — pre/post-matrix work is most of the function; partial loses
+  too much
+- cb[13] — clears capA/capB to 0, would undo CDVD stub
+- cb[7], cb[0] — no standard matrix
+- cb[30], cb[31] — prependers (phase 7 instability)
+
+Smoke: listWalker depth 13→12→10 across the two commits; zero
+recover-pc; vif1Idx still incrementing.
+
+**Coverage: 60 of 66 boot callbacks now real.**  Remaining 6 cannot
+benefit from the matrix-write partial pattern without solving deeper
+issues (capA/capB protection, helper-call instability, or
+non-matrix shapes that require full hand translation).
+
+## [2026-05-24 20:00] SESSION PAUSE — cycle 28 phases 8-13 (8 commits this resume)
 
 Session footprint:
 - Phase 8 (b083d58): doc-only VIF1_MARK force-engage revert note
