@@ -355,7 +355,10 @@ def main():
         bf.write('if not exist "%OUTDIR%" mkdir "%OUTDIR%"\n\n')
         bf.write("echo Compiling sub_0031D200 chunks with clang-cl...\n")
         bf.write("set FAILED=0\n\n")
-        bf.write('set CLANGFLAGS=/c /Od /bigobj /std:c++20 /EHsc /MD\n')
+        # /arch:AVX enables SSE4.1 (required for _mm_blendv_ps used in
+        # VU0 vector-blend emulation, e.g. PS2_VBLEND macro).  Without
+        # this flag clang-cl errors on every chunk that touches a VBLEND.
+        bf.write('set CLANGFLAGS=/c /Od /bigobj /std:c++20 /EHsc /MD /arch:AVX\n')
         bf.write('set INCLUDES=-I"%INC1%" -I"%INC2%" -I"%INC3%" -I"%INC4%" -I"%INC5%" -I"%INC6%" -I"%INCCHUNKS%"\n\n')
         bf.write("echo   Compiling master dispatcher...\n")
         bf.write(f'clang-cl %CLANGFLAGS% %INCLUDES% -Fo"%OUTDIR%\\sub_0031D200_0x31d200.obj" "%SRCDIR%\\sub_0031D200_0x31d200.cpp"\n')
