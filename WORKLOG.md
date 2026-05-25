@@ -92,7 +92,60 @@ solved (better stack/ra contract emulation) or (b) we accept partial
 behavior (just the matrix-write, drop the helper call).  Both are
 multi-cycle investigations outside this phase's scope.
 
-## [2026-05-24 19:10] SESSION PAUSE — cycle 28 phase 9 end (2 commits this resume)
+## [2026-05-24 19:25] Cycle 28 phase 10 — VIF1_MARK is hardware-set; explains phase 6/8
+
+**Type:** blocker-resolved (root cause now known, no code change)
+**Cycle:** 28
+
+**Finding:** NO recompiled function writes VIF1_MARK (0x10003C30).
+
+Grep across all 3478+ generated `.cpp` files:
+- VIF1 MMIO writes found: only `sub_258C70` writes 0x10003C00
+  (VIF1_STAT clear) and `sub_2596A0` writes 0x1000B400/B420/B430
+  (VIF1 DMA CHCR/MADR/TADR — the GIF DMA path).
+- ZERO writes to 0x10003C30 (VIF1_MARK) anywhere.
+
+**Root cause:** On real PS2, VIF1_MARK is set by the VIF1 hardware unit
+when it processes a MARK opcode embedded in the DMA chain.  The game's
+code emits a chain whose tags include a MARK command; the VIF1 unit
+reads the chain, encounters MARK, and stores its operand into the
+hardware register at 0x10003C30.
+
+This is not a software write — it's a hardware-driven side effect of
+chain interpretation that our runtime cannot reproduce without a VIF1
+microcode interpreter (the long-standing "VU1 microcode: Stub" item
+in CLAUDE.md status table).
+
+**Consequences (explain prior cycle results):**
+- Phase 6 (capA/capB=0x100): unlocked vif1_buildPacket entry; vif1Idx
+  increments because the function loops over GS state descriptors.
+  But MARK never fires because no software path writes it.
+- Phase 8 (force VIF1_MARK=1): vif1_frameSubmit DID engage, but the
+  ring-buffer chain was incomplete (build path produces partial data
+  meant to be consumed by VU1 microcode that doesn't exist).  Submit
+  JALRed into garbage — recover-pc cascade.
+
+**What this means for the future:**
+Getting actual VIF1→GS rendering working requires either:
+1. A VIF1 microcode interpreter (multi-cycle, large project) that
+   processes the chain in software the way hardware would, including
+   MARK handling.
+2. A "bypass" that snoops the chain data being built (in the GS state
+   buffer regions), converts the implied GIF packets directly, and
+   submits to the existing GIF DMA path — but this requires deep
+   understanding of what shapes the game intends to render.
+3. Continuing to rely on the existing 2D GIF path (sub_2596A0) and
+   accepting that 3D content never reaches the GS via this code path.
+
+Per CLAUDE.md, the canonical answer is "CDVD is the real blocker" — but
+that's about gating: CDVD loads the IOP GFX module which writes
+capA/capB.  Even WITH capA/capB set (which phase 6 demonstrated), the
+VIF1 chain still isn't interpretable without VU1 microcode support.
+
+This is a no-code-change worklog entry documenting the architectural
+finding for future cycles.
+
+## [2026-05-24 19:30] SESSION PAUSE — cycle 28 phase 10 end (3 commits this resume)
 
 ## [2026-05-24 11:55] SESSION RESUME — cycle 28
 

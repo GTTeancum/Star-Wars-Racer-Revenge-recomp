@@ -213,6 +213,8 @@ These are diagnostic/status messages, NOT 3D render commands.
 
 **Why VIF1_MARK never becomes 1:** vif1_buildPacket (0x257080) checks `vif1WriteIdx < capB`. capB=0 always, so the VIF1 3D path is never entered. Falls through to gif_dmaKick (2D path).
 
+**Even with capA/capB stubbed non-zero (cycle 28 phase 6+10), VIF1_MARK still never fires.** Grep across all 3478 generated `.cpp` files: ZERO software writes to 0x10003C30. On real PS2, VIF1_MARK is set by the VIF1 hardware unit when it processes a MARK opcode embedded in the DMA chain. This is hardware-driven; reproducing it requires a VIF1 microcode interpreter the runtime does not have. Force-writing MARK=1 (phase 8) makes vif1_frameSubmit engage but jalr into garbage because the chain build is incomplete (parts depend on VU1 microcode). See WORKLOG cycle 28 phase 10 for the full analysis.
+
 **GIF DMA (2D path) confirmed working:** sub_2596A0 fires each frame. Test triangle (bright green at 0x450020) renders correctly.
 
 **Why the "Sending texture while getting texture" warning fires every frame:**
