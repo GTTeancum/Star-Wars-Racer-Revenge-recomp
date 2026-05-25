@@ -260,7 +260,30 @@ CDVD-stub-aware override, or `inject_extra_entry_points.py` run +
 helper-call-contract solution).  None can be addressed with the
 matrix-only or single-data-write partial patterns used in phases 9-16.
 
-## [2026-05-24 20:30] SESSION PAUSE — cycle 28 phases 8-16 (13 commits this resume)
+## [2026-05-25 00:20] Cycle 28 phase 17 — cb[13] CDVD-stub-aware partial
+
+**Type:** milestone
+**Cycle:** 28
+**Commit:** d77fc78
+
+Selectively translated cb[13] @ 0x3CA780.  Faithful translation would
+zero capA/capB and undo the cycle-28-phase-6 CDVD stub.  Partial:
+- Performs the vif1-idx clear (semantically a no-op given zero-init)
+- Performs the 4 timer-struct +4 clears (the dropped helpers' first
+  instruction)
+- SKIPS the capA/capB writes
+- SKIPS the 4 timer-init helper jals
+
+Smoke: listWalker depth 7→6, capA=capB=0x100 preserved at frame=1,
+zero recover-pc.
+
+**Coverage: 64 of 66 boot callbacks now real.**
+
+Final 2 require infrastructure (not the partial pattern):
+- cb[7]  — needs handle-allocator stub
+- cb[30] — needs inject_extra_entry_points.py + helper-contract solve
+
+## [2026-05-25 00:25] SESSION PAUSE — cycle 28 phases 8-17 (15 commits this resume)
 
 Session-wide stats:
 - 13 commits total (8 cb-translation phases, 1 architectural finding,
