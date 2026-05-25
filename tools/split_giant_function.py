@@ -205,19 +205,34 @@ def main():
             return line
         target = m.group(1).lower()
         if target not in label_to_chunk:
-            return line
+            # Target label is not defined anywhere in the source.  This happens
+            # because sub_31D200 runs into the data segment — the recompiler
+            # emits case entries for every plausible PC value but only defines
+            # labels for actual instructions.  PCs in data regions get case
+            # entries without corresponding labels.  Drop the line entirely;
+            # the runtime's exception/recover-pc handler catches PCs that fall
+            # through to default.
+            return ""
         target_chunk = label_to_chunk[target]
         if target_chunk == current_label_chunk:
             return line
 
-        # Cross-chunk: replace goto with chunk call + return
+        # Cross-chunk: replace `goto label_X;` with cross-chunk dispatch.
+        # Two shapes to handle:
+        #  (a) `        goto label_X;`           — standalone unconditional goto
+        #  (b) `        case 0xXu: goto label_X;` — inside an inner switch table
+        # For (a) we replace the whole line.  For (b) we MUST preserve the
+        # `case 0xXu:` prefix so the inner switch dispatches correctly; we
+        # replace just the `goto label_X;` portion.
         target_addr = label_to_addr[target]
-        indent = len(line) - len(line.lstrip())
-        indent_str = line[:indent]
-        return (
-            f"{indent_str}ctx->pc = 0x{target_addr:x}u;\n"
-            f"{indent_str}sub_0031D200_chunk_{target_chunk:04d}(rdram, ctx, runtime); return;\n"
+        replacement = (
+            f"{{ ctx->pc = 0x{target_addr:x}u; "
+            f"sub_0031D200_chunk_{target_chunk:04d}(rdram, ctx, runtime); return; }}"
         )
+        # In-place substitute the goto only — preserves any `case XXu:` prefix
+        # on the same line.  The trailing semicolon is replaced by the block
+        # we emit (which has its own `; }`).
+        return LABEL_GOTO_RE.sub(replacement, line, count=1)
 
     with open(args.input, "r", encoding="utf-8", errors="replace") as f:
         labels_seen = 0
@@ -303,7 +318,7 @@ def main():
         mf.write("        default: break;\n")
         mf.write("    }\n")
         mf.write("    // Unknown pc -- return via $ra\n")
-        mf.write("    ctx->pc = ctx->gpr[31];\n")
+        mf.write("    ctx->pc = GPR_U32(ctx, 31);\n")
         mf.write("}\n")
     print(f"[split] Wrote master: {master_path}")
 

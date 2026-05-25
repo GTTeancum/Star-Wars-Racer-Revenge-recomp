@@ -15,6 +15,7 @@ src/generated/
 # sub_0031D200 chunk split + clang-cl objs (2.8GB+ — not for repo)
 src/generated_chunks/
 src/clang_objs/
+src/clang_objs_test/
 
 # Per-cycle diagnostic dumps left in repo root
 diag*.txt
