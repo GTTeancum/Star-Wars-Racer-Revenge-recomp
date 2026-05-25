@@ -517,7 +517,30 @@ fixed in the splitter so future regens are clean:
 Build restarted with both fixes applied.  Monitor armed to notify on
 any further failures.
 
-## [2026-05-25 17:10] SESSION PAUSE — cycle 28 phases 8-26 (29 commits this resume)
+## [2026-05-25 17:25] Cycle 28 phase 27 — preflight chunk-integration symbol conflict
+
+**Type:** preemptive fix
+**Cycle:** 28
+**Commit:** 6ed1c2c
+
+Discovered while waiting for the chunk compile: `large_function_stubs.cpp`
+unconditionally provides `sub_0031D200_0x31d200` (interpreter fallback),
+and CMakeLists.txt always includes large_function_stubs.cpp.  Once the
+chunk master is linked, both would provide the same symbol → "multiply
+defined" linker error.
+
+Fix applied preemptively before the in-flight 482-chunk compile lands:
+- Guard the interpreter fallback with `#ifndef D200_CHUNKS_AVAILABLE`
+- CMakeLists adds `add_compile_definitions(D200_CHUNKS_AVAILABLE)` when
+  the chunk master + .obj files are both present
+
+Without this preflight, the next session would have hit the link error
+seconds after the compile finished — now the integration is one rebuild
+away once the chunks complete.
+
+Build progress at this entry: 211/482 chunks compiled, zero failures.
+
+## [2026-05-25 17:30] SESSION PAUSE — cycle 28 phases 8-27 (31 commits this resume)
 
 Background full-chunk compile running (bixt2ft1n).  Expected duration
 ~hours.  Notification on failure (filtered to FAILED/error/fatal) or
