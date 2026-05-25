@@ -2262,6 +2262,7 @@ int main(int argc, char* argv[])
             {0x003CB300u, 0x00443AB0u}, // [39]
             {0x003CB380u, 0x00443B00u}, // [40]
             {0x003CB400u, 0x00443B40u}, // [41]
+            {0x003CB4A0u, 0x00443CA0u}, // [42] PARTIAL: matrix only; drops extensive pre/post writes + helper jals + loop
             {0x003CB790u, 0x00443E40u}, // [43]
             {0x003CB8C0u, 0x00443F20u}, // [44]
             {0x003CBA10u, 0x00444000u}, // [46]
@@ -2787,7 +2788,7 @@ int main(int argc, char* argv[])
             0x003CAC20u, 0x003CACA0u, 0x003CAD20u, 0x003CADA0u, 0x003CAE20u,
             0x003CAEA0u, 0x003CAF20u, 0x003CB040u, 0x003CB0C0u, 0x003CB170u,
             0x003CB1F0u, 0x003CB270u, 0x003CB2F0u, 0x003CB300u, 0x003CB380u,
-            0x003CB400u, 0x003CB790u, 0x003CB8C0u, 0x003CBA10u, 0x003CBAB0u,
+            0x003CB400u, 0x003CB4A0u /*[42] partial*/, 0x003CB790u, 0x003CB8C0u, 0x003CBA10u, 0x003CBAB0u,
             0x003CBB30u, 0x003CBBB0u, 0x003CBC30u, 0x003CBCB0u, 0x003CBD30u,
             0x003CBDB0u, 0x003CBE30u, 0x003CBEB0u, 0x003CBF30u, 0x003CBFE0u,
             0x003CC060u, 0x003CC0E0u, 0x003CC160u, 0x003CC1E0u /*[62] partial*/, 0x003CC2D0u, 0x003CC350u,
