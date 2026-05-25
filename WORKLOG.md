@@ -36,6 +36,64 @@ This file is the substitute for asking Steve questions. Every decision that woul
 
 <!-- ENTRIES BELOW THIS LINE — NEWEST FIRST -->
 
+## [2026-05-24 18:50] SESSION RESUME — cycle 28 continues
+
+**Type:** session-marker
+**Cycle:** 28
+
+User: "Continue recomp".  Reread CLAUDE.md + WORKLOG tail.  Tree had one
+uncommitted change: phase-8 doc-only comment block in main.cpp.
+
+## [2026-05-24 18:55] Cycle 28 phase 8 — committed (doc-only revert note)
+
+**Type:** result
+**Cycle:** 28
+**Commit:** b083d58
+
+Documented the failed VIF1_MARK force-engage experiment as a comment in
+gameFrameLoop.  No code change — phase 8 itself was reverted at end of
+cycle 28 phase 7.
+
+## [2026-05-24 19:05] Cycle 28 phase 9 — callback[57] translated (pure float)
+
+**Type:** milestone
+**Cycle:** 28
+**Commit:** 3c4143d
+
+Enumerated the 12 remaining unhandled callbacks (set diff: 66-entry
+array minus kSkipPcs).  Decoded all 12.  Picked cb[57] @ 0x3CBFB0 as
+the only one with zero jal calls — 8 instructions, pure data init.
+
+Semantics: `rdram[0x444500] = 1.0f / load_float(rdram[0x383640])`
+ELF data at 0x383640 = 32767.0f → stored value = 0.000030519.
+Likely an int16-range scale constant.
+
+Smoke result (`logs/cb57_out.txt`):
+- callback[57] fires once with expected values
+- listWalker depth: 14 (was 15; cb[57] no longer creates a synthetic node)
+- All previous translated callbacks (11, 18, 34, 65, 51 type-A) still
+  fire correctly
+- vif1Idx still incrementing (0x14→0x32→0x4E)
+- capA=capB=0x100, state6=0xffffffff — plateau preserved
+- Zero recover-pc events
+
+**Cycle 28 callback coverage: 56 of 66 real** (52 type-A + cb[65] + 4
+specific: cb[11], cb[18], cb[34], cb[57]); 10 still on synthPrepend.
+
+**Remaining 10 (all involve helper jal calls — phase 7 helper-call
+instability risk):**
+- [0] [3] [7] [10] [13] [42] [45] [62] — type-A/larger w/helper jals
+  (sub_002E8860 appears in cb[42], cb[62])
+- [30] [31] — prependers with helper jals (phase 7 tried, reverted)
+
+The remaining set cannot be tackled with the current "hand-translate
+override" approach until either (a) the helper-call instability is
+solved (better stack/ra contract emulation) or (b) we accept partial
+behavior (just the matrix-write, drop the helper call).  Both are
+multi-cycle investigations outside this phase's scope.
+
+## [2026-05-24 19:10] SESSION PAUSE — cycle 28 phase 9 end (2 commits this resume)
+
 ## [2026-05-24 11:55] SESSION RESUME — cycle 28
 
 **Type:** session-marker
