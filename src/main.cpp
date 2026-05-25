@@ -2137,6 +2137,38 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
+    // --- callback[13] @ 0x3CA780 — CDVD-stub-aware partial ---
+    //
+    // Cycle 28 phase 17.  Full cb[13] does:
+    //   1) rdram[0x435A00] = 0     (VIF1 write idx clear; already 0 at boot)
+    //   2) rdram[0x43AA04] = 0     (capA clear — MUST SKIP, undoes CDVD stub)
+    //   3) rdram[0x43FA08] = 0     (capB clear — MUST SKIP)
+    //   4) 4x helper jal (sub_164AA0 ×3, sub_164DD0 ×1) with $a0={
+    //         0x442A58, 0x442AC8, 0x442AE8, 0x442B48}, $a1=5000
+    //         The helpers are timer-init (read T0_COUNT, compute delta).
+    //         Their only easy-to-replicate side effect is `sw $zero, 4($a0)`.
+    //
+    // Partial: do step (1) (no-op since runtime zero-init) + the four
+    // `sw $zero, 4($a0)` clears.  Skip steps (2), (3) to preserve the
+    // cycle-28-phase-6 CDVD stub.  Skip the timer math.
+    runtime.registerFunction(0x3CA780u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        if (!rdram || !ctx) return;
+        // Step (1) — vif1 write idx (redundant but matches semantics)
+        *(uint32_t*)(rdram + 0x435A00u) = 0u;
+        // Step (4) partial — per-target `sw $zero, 4($a0)`
+        *(uint32_t*)(rdram + 0x442A58u + 4u) = 0u;
+        *(uint32_t*)(rdram + 0x442AC8u + 4u) = 0u;
+        *(uint32_t*)(rdram + 0x442AE8u + 4u) = 0u;
+        *(uint32_t*)(rdram + 0x442B48u + 4u) = 0u;
+        // Steps (2), (3) deliberately SKIPPED to preserve capA/capB stub.
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[13] 0x3CA780] partial: 4 timer-struct +4 clears (capA/capB preserved)\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // --- callback[31] @ 0x3CAFF0 — static data write only (PARTIAL) ---
     //
     // Cycle 28 phase 16.  Full cb[31] does:
@@ -2803,6 +2835,7 @@ int main(int argc, char* argv[])
             0x003CA620u, // [11] prepender (matrix + func_299130)
             0x003CA9F0u, // [18] prepender
             0x003CB140u, // [34] prepender
+            0x003CA780u, // [13] partial: CDVD-stub-aware (skips capA/capB clears)
             0x003CAFF0u, // [31] partial: static data write only
             0x003CB940u, // [45] matrix+8 trailing words at 0x443F60
             0x003CBFB0u, // [57] pure float reciprocal (1/32767 -> 0x444500)
