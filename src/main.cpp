@@ -880,6 +880,27 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     // sub_2596A0 knows to spin (waiting for 0xFFF500 to clear it).
                     Ps2FastWrite32(rdram, 0x443DC8u, 1u);
 
+                    // Phase 36: when game-logic state is installed (sub_31D200),
+                    // we still need gs_initState to drive the rendering pipeline
+                    // every frame.  Call gs_initState FIRST so VIF1 packet build
+                    // continues, then game logic.
+                    if (stateFunc == 0x31d200u) {
+                        try {
+                            R5900Context renderCtx{};
+                            renderCtx.pc = 0x251B10u;
+                            SET_GPR_U32(&renderCtx, 29, 0x44BC80u);
+                            SET_GPR_U32(&renderCtx, 31, 0u);
+                            auto rfn = runtime->lookupFunction(0x251B10u);
+                            if (rfn) rfn(rdram, &renderCtx, runtime);
+                        } catch (...) {
+                            static std::atomic<uint32_t> s_renderErrs{0};
+                            if (s_renderErrs.fetch_add(1u) < 3u) {
+                                std::cerr << "[Frame] render-side gs_initState threw"
+                                          << std::endl;
+                            }
+                        }
+                    }
+
                     auto fn = runtime->lookupFunction(stateFunc);
                     if (fn) {
                         fn(rdram, &frameCtx, runtime);
