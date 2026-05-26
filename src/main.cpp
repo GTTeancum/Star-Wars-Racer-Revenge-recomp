@@ -827,6 +827,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 const uint32_t modState6 = (stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu)
                                            ? *(uint32_t*)(rdram + stateTablePtr + 24u)
                                            : 0xDEADBEEFu;
+                const uint32_t modTable0 = *(uint32_t*)(rdram + 0x385160u);
                 std::cout << "[FrameDiag] frame=" << s_frameCount
                           << " state=0x" << std::hex << stateFunc
                           << " 443DC8=0x" << dat443DC8
@@ -846,6 +847,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                           << " renderCtx=0x" << renderCtxPtr
                           << " stateTP=0x" << stateTablePtr
                           << " state6=0x" << modState6
+                          << " modT0=0x" << modTable0
                           << std::dec << std::endl;
 
                 // Dump all 32 module state slots once per second (every 60 frames).
