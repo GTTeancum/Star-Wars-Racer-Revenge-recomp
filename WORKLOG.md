@@ -704,7 +704,74 @@ the bridge needed.
 Build kicked off (cold rebuild after the /O1 racer_revenge.dir cleanup
 in phase 31); ~30 min expected.  Results in next phase.
 
-## [2026-05-25 20:00] SESSION END — cycle 28 phases 8-32 (37 commits this resume)
+## [2026-05-25 21:50] Cycle 28 phases 33-36 — sub_31D200 RUNNING per frame
+
+**Type:** MILESTONE (deepest state ever reached)
+**Cycle:** 28
+**Commits:** fe623b2 (chain trace findings), 043455e (bridge works),
+            2a65c99 (dual-call gs_initState + sub_31D200)
+
+Phase 33 instrumented the call chain to sub_31D200 (7 functions
+between it and the running main loop) and observed every tracer
+silent — nothing in the chain executes naturally.  Static grep
+showed:
+- Only sub_0031D200 reads/writes rdram[0x385160] (modTable[0])
+- Only setGameState (label_2fddf8 in sub_2FDCE8) writes 0x384670
+- Only sub_31C650 (one site) statically calls sub_31D200
+- modT0 transitions to 0x16 (=22) at frame=61 (gate IS open)
+
+**Diagnosis**: chicken-and-egg.  sub_31D200 is the only function
+that can install a successor state function (via embedded
+setGameState calls), but it never runs because gs_initState
+(0x251B10) is the currently-installed state, and only sub_31D200
+can change that.
+
+Phase 34: invoke sub_31D200 once at frame=90 via lookupFunction.
+Result — ran cleanly, returned, zero recover-pc, ChainTracer fired.
+Confirmed sub_31D200 is callable.
+
+Phase 35: after the one-shot, force-install 0x384670 = 0x31d200.
+Frame loop's next iteration picks it up.  Result — state advances:
+0x251b10 → 0x31d200 across frames 241,301,361... but vif1Idx
+stalled at 0x20 (gs_initState displaced).
+
+Phase 36: dual-call.  When stateFunc == 0x31d200, also invoke
+gs_initState per frame in its own context.  Result:
+- state=0x31d200 (game logic running)
+- vif1Idx growing again: 0x68 → 0xa3 across frames 241→361
+- Zero recover-pc; both subsystems stable
+
+**FIRST STATE-MACHINE ADVANCE PAST gs_initState IN PROJECT HISTORY.**
+
+What's still NOT observable:
+- Visible 3D content (still gated by VIF1 microcode interpreter
+  per [[project-vif1-mark]])
+- sub_31D200 self-loops (returns the same 0x31d200 state), so
+  no further state transitions yet — presumably waiting for IOP
+  responses, additional module state, or CDVD data we haven't
+  wired up
+
+But the architecture now supports running game logic.  Future
+cycles debug WHY sub_31D200's internal dispatch doesn't advance,
+not whether it can run.
+
+## [2026-05-25 22:00] SESSION END — cycle 28 phases 8-36 (42 commits this resume)
+
+Cycle 28 closing state:
+- 65/66 boot callbacks translated to real overrides
+- sub_31D200 (the 748KB architectural blocker since cycle 1) is
+  compiled, linked, AND executing per frame
+- Game state machine advances past gs_initState plateau
+- Dual-call pattern (render + game logic) running stably
+- 125 MB exe (with size-reduction plan logged in SIZE_REDUCTION.md
+  for a future cycle when visible gameplay justifies the work)
+- Zero recover-pc regressions across 42 commits
+
+Pickup for next cycle: with sub_31D200 self-looping, the question
+becomes "what condition does sub_31D200 wait for that we haven't
+satisfied?"  Likely candidates: another module state slot, an IOP
+response, a CDVD callback.  Instrument the sub_31D200 entry to log
+which branch it takes on each call.
 
 Final state: chain-tracer code committed; cold rebuild in progress in
 the background (task b2nzzozti, monitor bzordecv4 armed for errors
