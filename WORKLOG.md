@@ -640,7 +640,92 @@ green, vif1Idx incrementing 0x18→0x30→0x48→0x62, state6 advances
 **125 MB is only 7 MB more than the no-chunks baseline (118 MB), which
 is exactly what we'd expect: the chunks add real code, not scaffolding.**
 
-## [2026-05-25 19:25] SESSION END — cycle 28 phases 8-30 (35 commits this resume)
+## [2026-05-25 19:35] Cycle 28 phase 31 — defer size-reduction work; log plan
+
+**Type:** decision + doc
+**Cycle:** 28
+**Commit:** bba6d83
+
+Steve flagged 125 MB exe as not acceptable for a PS2 port (target:
+10 MB).  Attempted `/O1` on generated sources: `cl.exe` OOM'd at
+3.6 GB RAM on a single source file before stalling — same mega-
+dispatch-table bloat pattern that chunking solved for sub_31D200,
+recurring in other generated functions.  Killed and reverted.
+
+*Question:* Tackle size reduction now (the proper engineering path
+identified) or defer?
+
+*Answer:* Defer.
+
+*Reasoning:*
+- 125 MB is engineering hygiene; doesn't block any current task
+- Optimization (/O1+, LTO) risks regressing the cycle-28 baseline by
+  exposing latent recompiler emit-ordering bugs (delay slots, hi/lo
+  pairs, vu0_vf SIMD lanes) — debugging would conflate "did size
+  work break it?" with "did sub_31D200 path break it?"
+- The actual valuable next task is bridging sub_31D200's call chain
+
+Wrote `SIZE_REDUCTION.md` with the five-step plan to reach 10 MB:
+  1) Per-file optimization profile        → ~60-70 MB
+  2) Generalize dispatch-table stripper   → ~45-55 MB
+  3) LTO + strip debug symbols            → ~30-40 MB
+  4) Trim raylib + runtime surface area   → ~25-35 MB
+  5) Recompiler emission changes          → ~5-10 MB (the only path
+     to <20 MB; multi-cycle ps2_recomp submodule work)
+
+CMakeLists comment now documents the /O1 OOM so the next attempt
+isn't blind.
+
+## [2026-05-25 19:55] Cycle 28 phase 32 — instrument sub_31D200 call chain
+
+**Type:** investigation in flight
+**Cycle:** 28
+**Commit:** 5b2108a
+
+Static grep mapped the upstream chain:
+  sub_31D200 ← sub_31C650 (only non-self caller: sub_31C310)
+             ← sub_31C310 (callers: sub_316310, sub_31C230)
+             ← sub_316310 (callers: sub_2B06F0, sub_316250)
+             ← sub_2B06F0 (callers: sub_2B0580)
+             ← sub_2B0580 (callers: sub_2B0370)
+             ← sub_2B0370 (callers: sub_2B01D0, sub_2BAF90, sub_2DE900)
+
+That's the static graph but says nothing about runtime reachability.
+Cycle 27 trace said nothing reaches sub_31D200, but didn't pinpoint
+where the chain stops firing.
+
+Wrapped seven functions in the chain (sub_31D200 down through
+sub_2B0370) with log-once trampolines that record first-call + caller
+\$ra then forward to the real function.  Once the binary rebuilds,
+running for ~10s headless will show which (if any) fire.  The HIGHEST
+firing function is closest to the runtime; the gap to sub_31D200 is
+the bridge needed.
+
+Build kicked off (cold rebuild after the /O1 racer_revenge.dir cleanup
+in phase 31); ~30 min expected.  Results in next phase.
+
+## [2026-05-25 20:00] SESSION END — cycle 28 phases 8-32 (37 commits this resume)
+
+Final state: chain-tracer code committed; cold rebuild in progress in
+the background (task b2nzzozti, monitor bzordecv4 armed for errors
+or completion).
+
+Pickup for next session:
+1. Confirm rebuild completed cleanly
+2. Run `timeout 10 build/Release/racer_revenge.exe > logs/chain_trace.txt 2>&1`
+3. `grep ChainTrace logs/chain_trace.txt` — see which chain functions fired
+4. Highest-firing → bridge from there to sub_31D200
+
+Phases 8-32 of cycle 28 in one resume:
+- Boot callbacks 57→65 of 66 (phases 8-18)
+- Three architectural findings memorialized (19-20)
+- Chunking infrastructure end-to-end (21-26): byte-aware splitter,
+  recompiler-bug post-processor, build-batch fixes, preflight link
+  guard
+- sub_31D200 in the binary for the first time (29)
+- Dispatch-table strip: 975 MB → 125 MB exe (30)
+- Size-reduction plan logged for future cycle (31)
+- Chain instrumentation kicked off (32)
 
 **Headline accomplishment**: sub_0031D200, the 748KB game-logic black
 hole that has been the architectural blocker since cycle 1, is now
