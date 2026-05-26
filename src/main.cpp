@@ -1368,6 +1368,52 @@ int main(int argc, char* argv[])
         });
     }
 
+    // --- sub_31D200 call-chain tracers (cycle 28 phase 32) ---
+    //
+    // sub_31D200 is now in the binary (phase 29) but cycle 27 trace
+    // confirmed nothing calls it.  Per CLAUDE.md the chain is:
+    //   sub_31D200 ← sub_31C650 ← sub_31C310 ← sub_316310 ← sub_2B06F0
+    //              ← sub_2B0580 ← (?)
+    // Wrap each with a log-once trampoline that records first-call and
+    // then forwards to the real function.  Whichever ones FIRE tell us
+    // how far down the chain execution reaches; the gap between the
+    // highest-firing one and sub_31D200 is the bridge to build.
+    //
+    // registerFunction wants a plain function pointer, so manual unroll.
+    {
+        extern void sub_0031D200_0x31d200(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_0031C650_0x31c650(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_0031C310_0x31c310(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_00316310_0x316310(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002B06F0_0x2b06f0(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002B0580_0x2b0580(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002B0370_0x2b0370(uint8_t*, R5900Context*, PS2Runtime*);
+
+        #define CHAIN_TRACER(VA, NAME, REAL)                                       \
+            runtime.registerFunction((VA),                                         \
+                +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* rt) {           \
+                    static std::atomic<bool> s_logged{false};                      \
+                    if (!s_logged.exchange(true)) {                                \
+                        const uint32_t ra = GPR_U32(ctx, 31);                      \
+                        printf("[ChainTrace] %s @0x%08X FIRED  ra=0x%08X\n",       \
+                               NAME, (VA), ra);                                    \
+                        fflush(stdout);                                            \
+                    }                                                              \
+                    REAL(rdram, ctx, rt);                                          \
+                });
+
+        CHAIN_TRACER(0x31D200u, "sub_31D200", sub_0031D200_0x31d200)
+        CHAIN_TRACER(0x31C650u, "sub_31C650", sub_0031C650_0x31c650)
+        CHAIN_TRACER(0x31C310u, "sub_31C310", sub_0031C310_0x31c310)
+        CHAIN_TRACER(0x316310u, "sub_316310", sub_00316310_0x316310)
+        CHAIN_TRACER(0x2B06F0u, "sub_2B06F0", sub_002B06F0_0x2b06f0)
+        CHAIN_TRACER(0x2B0580u, "sub_2B0580", sub_002B0580_0x2b0580)
+        CHAIN_TRACER(0x2B0370u, "sub_2B0370", sub_002B0370_0x2b0370)
+
+        #undef CHAIN_TRACER
+        std::cout << "[Bootstrap] Installed 7 sub_31D200 chain tracers" << std::endl;
+    }
+
     // --- 0x00FFF100  vblank_notify (synthetic) ---
     // Native C++ handler registered at a sentinel VA. Installed as the INTC
     // VBLANK_START handler so the interrupt worker signals s_vblankCv on each
