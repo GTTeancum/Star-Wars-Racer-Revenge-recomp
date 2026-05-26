@@ -911,6 +911,70 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 }
             }
 
+            // CYCLE 28 PHASE 34 — sub_31D200 bridge experiment
+            //
+            // Phase 33 confirmed:
+            //   - modTable[0] = 22 (gate is open, set at frame=61)
+            //   - sub_31D200 is the ONLY function that writes 0x384670
+            //     (the game state fn ptr) and reads modTable[0]
+            //   - sub_31D200 never runs because gs_initState (0x251B10)
+            //     is the currently-installed state and only sub_31D200
+            //     can install a new one
+            //
+            // Bridge: invoke sub_31D200 from the frame loop ONCE
+            // (after first FrameDiag).  Expected: it dispatches based
+            // on modTable[0]=22, installs a new state function, returns.
+            // Next frame's stateFunc lookup picks up the new pointer
+            // and the plateau breaks.
+            //
+            // Risk: sub_31D200 is 748KB of game logic.  If it accesses
+            // uninitialized state (which is likely — boot subsystems
+            // are stubbed), it could crash.  Wrapped in try/catch to
+            // observe behavior without killing the runtime.
+            {
+                static std::atomic<bool> s_d200Tried{false};
+                if (s_frameCount >= 90u && !s_d200Tried.exchange(true)) {
+                    std::cout << "[BridgeExp] frame=" << s_frameCount
+                              << " calling sub_31D200(pc=0x31d200)..."
+                              << std::endl;
+                    R5900Context d200Ctx{};
+                    SET_GPR_U32(&d200Ctx, 29, 0x44BC80u); // $sp = EE stack
+                    SET_GPR_U32(&d200Ctx, 28, *(uint32_t*)(rdram + 0x100008u)); // $gp from _start
+                    SET_GPR_U32(&d200Ctx, 31, 0u);         // $ra = 0
+                    d200Ctx.pc = 0x31d200u;
+                    try {
+                        auto fn = runtime->lookupFunction(0x31d200u);
+                        if (fn) {
+                            fn(rdram, &d200Ctx, runtime);
+                            const uint32_t newGameState =
+                                *(uint32_t*)(rdram + 0x384670u);
+                            std::cout << "[BridgeExp] sub_31D200 returned cleanly"
+                                      << "; new 0x384670=0x"
+                                      << std::hex << newGameState << std::dec
+                                      << std::endl;
+                            // Phase 35: install sub_31D200 AS the per-frame
+                            // state function.  The natural game-logic dispatch
+                            // pattern: state func runs every frame, checks
+                            // modTable[0], dispatches.  Force-install to break
+                            // the chicken-and-egg.
+                            if (newGameState == 0x251b10u) {
+                                std::cout << "[BridgeExp] forcing 0x384670=0x31D200"
+                                             " (game-logic state-fn install)"
+                                          << std::endl;
+                                *(uint32_t*)(rdram + 0x384670u) = 0x31d200u;
+                            }
+                        } else {
+                            std::cout << "[BridgeExp] no function at 0x31d200!"
+                                      << std::endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cout << "[BridgeExp] sub_31D200 threw: " << e.what()
+                                  << " pc=0x" << std::hex << d200Ctx.pc
+                                  << std::dec << std::endl;
+                    }
+                }
+            }
+
             // CYCLE 28 PHASE 8 — VIF1_MARK force-engage experiment (reverted)
             //
             // Tried: runtime->memory().writeIORegister(0x10003C30u, 1u);
