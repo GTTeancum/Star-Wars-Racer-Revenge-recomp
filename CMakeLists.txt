@@ -95,6 +95,13 @@ target_link_libraries(racer_revenge PRIVATE ps2_runtime raylib)
 if(MSVC)
     target_compile_options(racer_revenge PRIVATE /MP2 /bigobj /FS)
     target_link_options(racer_revenge PRIVATE "/FORCE:MULTIPLE")
+    # Generated functions are huge (~3400 files).  /Od is forced because
+    # MSVC's optimizer OOMs on giant functions even after chunking
+    # sub_31D200: cycle 28 phase 31 attempted /O1 and `cl.exe` allocated
+    # 3.6 GB RAM on a single source before stalling.  A per-file approach
+    # (/Od for the giant ones, /O1 for the rest) would shave the binary
+    # significantly but requires identifying which files OOM — separate
+    # work item.  See WORKLOG cycle 28 phase 31.
     foreach(src ${GENERATED_SOURCES})
         set_source_files_properties(${src} PROPERTIES COMPILE_FLAGS "/Od")
     endforeach()
