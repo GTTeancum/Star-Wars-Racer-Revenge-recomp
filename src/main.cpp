@@ -5,6 +5,7 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "register_functions.h"
+#include "ps2_mips_interp.h"
 #include "raylib.h"
 
 #ifdef _DEBUG
@@ -23,6 +24,231 @@
 #include <unordered_map>
 #include <unordered_set>
 
+static void init_24a8e0_struct(uint8_t* rdram, uint32_t addr)
+{
+    if (!rdram) return;
+    *(uint16_t*)(rdram + addr + 0x00u) = 0xFFFFu;
+    *(uint8_t*)(rdram + addr + 0x02u) = 0u;
+    *(uint32_t*)(rdram + addr + 0x44u) = 1u;
+    *(uint32_t*)(rdram + addr + 0x48u) = 0u;
+    *(uint32_t*)(rdram + addr + 0x4Cu) = 0xFFu;
+    *(uint32_t*)(rdram + addr + 0x50u) = 0xFFu;
+    *(uint32_t*)(rdram + addr + 0x54u) = 0u;
+    *(uint32_t*)(rdram + addr + 0x58u) = 0u;
+    *(uint32_t*)(rdram + addr + 0x5Cu) = 1u;
+    *(uint32_t*)(rdram + addr + 0x60u) = 0u;
+    *(uint32_t*)(rdram + addr + 0x64u) = 1u;
+    *(uint32_t*)(rdram + addr + 0x68u) = 0x80u;
+    for (uint32_t off = 0x6Cu; off <= 0x80u; off += 4u) *(uint32_t*)(rdram + addr + off) = 0u;
+    *(uint32_t*)(rdram + addr + 0x84u) = 1u;
+    *(uint32_t*)(rdram + addr + 0x88u) = 0u;
+    *(uint32_t*)(rdram + addr + 0x8Cu) = 0u;
+    *(uint32_t*)(rdram + addr + 0x90u) = 1u;
+    *(uint32_t*)(rdram + addr + 0x94u) = 1u;
+    *(uint32_t*)(rdram + addr + 0x98u) = 1u;
+    for (uint32_t off = 0x9Cu; off <= 0xACu; off += 4u) *(uint32_t*)(rdram + addr + off) = 0u;
+    *(uint32_t*)(rdram + addr + 0xB0u) = 1u;
+    *(uint32_t*)(rdram + addr + 0xB4u) = 6u;
+    *(uint32_t*)(rdram + addr + 0xB8u) = 0x78u;
+    *(uint32_t*)(rdram + addr + 0xBCu) = 0u;
+    *(uint32_t*)(rdram + addr + 0xC0u) = 0u;
+    *(uint32_t*)(rdram + addr + 0xC4u) = 1u;
+    *(uint32_t*)(rdram + addr + 0xC8u) = 2u;
+    *(uint32_t*)(rdram + addr + 0xCCu) = 0u;
+}
+
+static void prepend_boot_node(uint8_t* rdram, uint32_t node, uint32_t fn, uint32_t data)
+{
+    if (!rdram) return;
+    const uint32_t oldHead = *(uint32_t*)(rdram + 0x446AD0u);
+    *(uint32_t*)(rdram + node + 0u) = oldHead;
+    *(uint32_t*)(rdram + node + 4u) = fn;
+    *(uint32_t*)(rdram + node + 8u) = data;
+    *(uint32_t*)(rdram + 0x446AD0u) = node;
+}
+
+static void call_299130_helper(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime,
+                               uint32_t data, uint32_t fn, uint32_t node)
+{
+    if (!rdram || !ctx || !runtime) return;
+    const uint32_t savedPc = ctx->pc;
+    const uint32_t savedRa = GPR_U32(ctx, 31);
+    const uint32_t savedA0 = GPR_U32(ctx, 4);
+    const uint32_t savedA1 = GPR_U32(ctx, 5);
+    const uint32_t savedA2 = GPR_U32(ctx, 6);
+    SET_GPR_U32(ctx, 4, data);
+    SET_GPR_U32(ctx, 5, fn);
+    SET_GPR_U32(ctx, 6, node);
+    SET_GPR_U32(ctx, 31, 0x00FFF000u);
+    ctx->pc = 0x00299130u;
+    if (auto helper = runtime->lookupFunction(0x00299130u)) helper(rdram, ctx, runtime);
+    SET_GPR_U32(ctx, 4, savedA0);
+    SET_GPR_U32(ctx, 5, savedA1);
+    SET_GPR_U32(ctx, 6, savedA2);
+    SET_GPR_U32(ctx, 31, savedRa);
+    ctx->pc = savedPc;
+}
+
+static uint32_t call_24cf80_helper(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime, uint32_t data)
+{
+    if (!rdram || !ctx || !runtime) return data;
+    const uint32_t savedPc = ctx->pc;
+    const uint32_t savedRa = GPR_U32(ctx, 31);
+    const uint32_t savedA0 = GPR_U32(ctx, 4);
+    SET_GPR_U32(ctx, 4, data);
+    SET_GPR_U32(ctx, 31, 0x00FFF000u);
+    ctx->pc = 0x0024CF80u;
+    if (auto helper = runtime->lookupFunction(0x0024CF80u)) helper(rdram, ctx, runtime);
+    const uint32_t result = GPR_U32(ctx, 2);
+    SET_GPR_U32(ctx, 4, savedA0);
+    SET_GPR_U32(ctx, 31, savedRa);
+    ctx->pc = savedPc;
+    return result ? result : data;
+}
+
+static void trace_boot_list_state(uint8_t* rdram, const char* tag, uint64_t n)
+{
+    const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+    const uint32_t stateTable = (modTable != 0u && modTable < 0x02000000u)
+        ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+        : 0u;
+    const uint32_t state6 = (stateTable != 0u && stateTable + 0x1Cu < 0x02000000u)
+        ? Ps2FastRead32(rdram, stateTable + 0x18u)
+        : 0u;
+    printf("[TRACE listFn %s] #%llu mt=0x%08X mt0=0x%08X st=0x%08X st6=0x%08X frame=0x%08X head=0x%08X flag44F588=0x%08X\n",
+           tag, (unsigned long long)n, modTable,
+           (modTable != 0u && modTable < 0x02000000u) ? Ps2FastRead32(rdram, modTable) : 0u,
+           stateTable, state6, Ps2FastRead32(rdram, 0x384670u),
+           Ps2FastRead32(rdram, 0x446AD0u), Ps2FastRead32(rdram, 0x44F588u));
+}
+
+static void trace_event_table(uint8_t* rdram, const char* tag, uint32_t n)
+{
+    if (!rdram) return;
+    const uint32_t base = 0x384968u;
+    const int32_t firstCount = (int32_t)Ps2FastRead32(rdram, base + 0x00u);
+    const int32_t secondCount = (int32_t)Ps2FastRead32(rdram, base + 0x04u);
+    const int32_t thirdCount = (int32_t)Ps2FastRead32(rdram, base + 0x08u);
+    const int32_t cursor = (int32_t)Ps2FastRead32(rdram, base + 0x0Cu);
+    printf("[TRACE eventTable %s] n=%u counts=%d/%d/%d cursor=%d head0=0x%08X head1=0x%08X head2=0x%08X\n",
+           tag, n, firstCount, secondCount, thirdCount, cursor,
+           Ps2FastRead32(rdram, base + 0x10u),
+           Ps2FastRead32(rdram, base + 0x14u),
+           Ps2FastRead32(rdram, base + 0x18u));
+    const uint32_t heads[3] = {
+        Ps2FastRead32(rdram, base + 0x10u),
+        Ps2FastRead32(rdram, base + 0x14u),
+        Ps2FastRead32(rdram, base + 0x18u),
+    };
+    const int32_t counts[3] = { firstCount, secondCount, thirdCount };
+    for (uint32_t seg = 0u; seg < 3u; ++seg) {
+        const uint32_t rows = counts[seg] > 0 ? (uint32_t)counts[seg] : 0u;
+        const uint32_t shown = rows < 4u ? rows : 4u;
+        for (uint32_t i = 0u; i < shown; ++i) {
+            const uint32_t row = heads[seg] + i * 0x10u;
+            if (row < 0x00100000u || row + 0x0Cu >= 0x02000000u) break;
+            printf("  [eventSeg%u row%u @0x%08X] a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X\n",
+                   seg, i, row,
+                   Ps2FastRead32(rdram, row + 0x00u),
+                   Ps2FastRead32(rdram, row + 0x04u),
+                   Ps2FastRead32(rdram, row + 0x08u),
+                   Ps2FastRead32(rdram, row + 0x0Cu));
+        }
+    }
+    fflush(stdout);
+}
+
+static void dump_event_list(uint8_t* rdram, const char* tag, uint32_t n, uint32_t modTable)
+{
+    if (!(modTable >= 0x00100000u && modTable + 0x1E8u < 0x02000000u)) {
+        printf("[%s] n=%u invalid modTable=0x%08X\n", tag, n, modTable);
+        return;
+    }
+    uint32_t list = modTable + 0x1D8u;
+    for (uint32_t seg = 0; seg < 4u; ++seg) {
+        if (!(list >= 0x00100000u && list + 0x10u < 0x02000000u)) {
+            printf("[%s] n=%u seg=%u invalid list=0x%08X\n", tag, n, seg, list);
+            break;
+        }
+        const uint32_t next = Ps2FastRead32(rdram, list + 0u);
+        const uint32_t count = Ps2FastRead32(rdram, list + 4u);
+        const uint32_t first = Ps2FastRead32(rdram, list + 8u);
+        printf("[%s] n=%u seg=%u list=0x%08X next=0x%08X count=%u first=0x%08X\n",
+               tag, n, seg, list, next, count, first);
+        const uint32_t dumpCount = (count < 4u) ? count : 4u;
+        for (uint32_t i = 0; i < dumpCount; ++i) {
+            const uint32_t rec = first + i * 0x58u;
+            if (!(rec >= 0x00100000u && rec + 0x58u < 0x02000000u)) {
+                printf("[%s] n=%u seg=%u rec%u invalid=0x%08X\n", tag, n, seg, i, rec);
+                continue;
+            }
+            printf("[%s] n=%u seg=%u rec%u rec=0x%08X w00=0x%08X w08=0x%08X flags=0x%04X "
+                   "w10=0x%08X w14=0x%08X w1c=0x%08X fn=0x%08X w28=0x%08X w38=0x%08X\n",
+                   tag, n, seg, i, rec,
+                   Ps2FastRead32(rdram, rec + 0x00u),
+                   Ps2FastRead32(rdram, rec + 0x08u),
+                   Ps2FastRead16(rdram, rec + 0x0Cu),
+                   Ps2FastRead32(rdram, rec + 0x10u),
+                   Ps2FastRead32(rdram, rec + 0x14u),
+                   Ps2FastRead32(rdram, rec + 0x1Cu),
+                   Ps2FastRead32(rdram, rec + 0x24u),
+                   Ps2FastRead32(rdram, rec + 0x28u),
+                   Ps2FastRead32(rdram, rec + 0x38u));
+        }
+        if (next == 0u || next == list) {
+            break;
+        }
+        list = next;
+    }
+    fflush(stdout);
+}
+
+static uint32_t run_2fe0c0_event_side_effects(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime)
+{
+    if (!rdram || !ctx || !runtime) return 0u;
+
+    const R5900Context savedCtx = *ctx;
+
+    SET_GPR_U32(ctx, 31, 0x00FFF000u);
+    ctx->pc = 0x002FE0C0u;
+    if (auto fn = runtime->lookupFunction(0x002FE0C0u)) {
+        fn(rdram, ctx, runtime);
+    }
+
+    const uint32_t result = GPR_U32(ctx, 2);
+    *ctx = savedCtx;
+    return result;
+}
+
+static std::string guest_cstr(uint8_t* rdram, uint32_t addr, size_t maxLen = 256)
+{
+    if (!rdram || addr == 0u || addr >= 0x02000000u) return {};
+    std::string out;
+    for (size_t i = 0; i < maxLen; ++i) {
+        const char c = *(const char*)(rdram + addr + (uint32_t)i);
+        if (c == '\0') break;
+        out.push_back(c);
+    }
+    return out;
+}
+
+static void trace_guest_bytes(const char* tag, uint8_t* rdram, uint32_t addr, uint32_t size)
+{
+    if (!tag || !rdram || addr < 0x00100000u || addr >= 0x02000000u) return;
+    const uint32_t len = std::min<uint32_t>(size, 32u);
+    if (addr + len >= 0x02000000u) return;
+    printf("%s addr=0x%08X size=%u hex:", tag, addr, size);
+    for (uint32_t i = 0u; i < len; ++i) {
+        printf(" %02X", rdram[addr + i]);
+    }
+    printf(" ascii='");
+    for (uint32_t i = 0u; i < len; ++i) {
+        const uint8_t c = rdram[addr + i];
+        putchar((c >= 32u && c < 127u) ? (int)c : '.');
+    }
+    printf("'\n");
+}
+
 // ---------------------------------------------------------------------------
 // VBlank synchronization
 // ---------------------------------------------------------------------------
@@ -36,6 +262,10 @@ static std::atomic<uint64_t> s_vblankCounter{0};
 // When 1, the 0xFFF200 sentinel writes state[6]=-1 instead of re-arming,
 // allowing the module manager to advance to "done" state.
 static std::atomic<uint32_t> s_iop_init_done{0};
+static std::atomic<uint32_t> s_ioprp_handshake_done{0};
+static std::atomic<uint32_t> s_real_asset_path_mode{0};
+static std::atomic<uint32_t> s_iop_gfx_rpc_ready{0};
+static std::atomic<uint32_t> s_iop_gfx_completion_posted{0};
 
 // INTC handler for VBlank — runs in the interrupt worker thread.
 // Lightweight: just signal the condition variable and return.
@@ -221,8 +451,10 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 // When the module manager calls it, $a0 = module_id = 6.
                 // Our custom setGameState override in main.cpp intercepts this
                 // and writes a valid game state function instead.
-                Ps2FastWrite32(rdram, stateBlockAddr + 6 * 4, 0x2FDDF8u);
-                std::cout << "[Bootstrap] Wrote setGameState to module slot 6" << std::endl;
+                std::cout << "[Bootstrap] Module state block ready at 0x"
+                          << std::hex << stateBlockAddr
+                          << "; leaving slot 6 for the real IOP/module path"
+                          << std::dec << std::endl;
 
                 // Start the main game loop in a background thread.
                 //
@@ -243,6 +475,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 // forever" semantics the recompiled control-flow didn't preserve.
                 std::thread gameLoopThread([rdram, runtime]() {
                     R5900Context loopCtx{};
+                    loopCtx.pc = 0x302DF0u;
                     SET_GPR_U32(&loopCtx, 28, 0x3DD970u); // $gp
                     SET_GPR_U32(&loopCtx, 29, 0x449000u); // $sp — separate from gameFrameLoop's 0x44BC80
                     SET_GPR_U32(&loopCtx, 31, 0u);         // $ra = 0 (never returns)
@@ -250,23 +483,37 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     std::cout << "[Bootstrap] Starting main game loop (0x302DF0) "
                               << "in background thread" << std::endl;
 
+                    uint64_t slices = 0;
                     uint64_t restarts = 0;
                     while (!runtime->isStopRequested()) {
-                        loopCtx.pc = 0x302DF0u;
+                        if (loopCtx.pc == 0x302DF0u) {
                         SET_GPR_U32(&loopCtx, 29, 0x449000u); // reset $sp each restart — separate stack
-                        SET_GPR_U32(&loopCtx, 31, 0u);
+
+                        }
 
                         try {
+                            if (loopCtx.pc == 0u) loopCtx.pc = 0x302DF0u;
                             auto fn = runtime->lookupFunction(0x302DF0u);
                             if (fn) fn(rdram, &loopCtx, runtime);
                         } catch (const std::exception& e) {
+                            if (std::string_view(e.what()) == "PS2 Thread Exit") {
+                                std::cerr << "[GameLoop] Main loop thread exited via ExitThread"
+                                          << std::endl;
+                                break;
+                            }
                             std::cerr << "[GameLoop] Exception: " << e.what()
                                       << " (restart " << restarts << ")" << std::endl;
+                            loopCtx.pc = 0x302DF0u;
+                            SET_GPR_U32(&loopCtx, 29, 0x449000u);
+                            SET_GPR_U32(&loopCtx, 31, 0u);
+                            ++restarts;
                         }
 
-                        ++restarts;
-                        if (restarts == 1 || (restarts % 1000u) == 0u) {
-                            std::cerr << "[GameLoop] Main loop restart #" << restarts
+                        ++slices;
+                        if (slices == 1 || (slices % 1000u) == 0u) {
+                            std::cerr << "[GameLoop] Main loop slice #" << slices
+                                      << " pc=0x" << std::hex << loopCtx.pc
+                                      << std::dec << " restarts=" << restarts
                                       << std::endl;
                         }
                         // Yield briefly so we don't spin-burn if the loop
@@ -389,9 +636,9 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     //   gifChainAddr [0x450010]: REFE DMA chain tag (QWC=11, ADDR=gifDataAddr)
                     //   gifDataAddr  [0x450020]: GIF A+D packet (1 GIFtag + 10 pairs = 11 qwords)
                     {
-                        const uint32_t gifDescAddr  = 0x450000u;
-                        const uint32_t gifChainAddr = 0x450010u;
-                        const uint32_t gifDataAddr  = 0x450020u;
+                        const uint32_t gifDescAddr  = 0x01E01000u;
+                        const uint32_t gifChainAddr = 0x01E01010u;
+                        const uint32_t gifDataAddr  = 0x01E01020u;
 
                         // gsState+0x88 → descriptor pointer
                         Ps2FastWrite32(rdram, gsStateAddr + 0x88u, gifDescAddr);
@@ -402,7 +649,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                         // REFE chain tag at gifChainAddr:
                         //   word[0] bits[15:0]=QWC=11, bits[30:28]=ID=0 (REFE), IRQ=0
                         //   word[1] = ADDR = gifDataAddr  (source of the 11 GIF qwords)
-                        Ps2FastWrite32(rdram, gifChainAddr + 0u, 0x0000000Bu); // QWC=11
+                        Ps2FastWrite32(rdram, gifChainAddr + 0u, 0x00000000u); // QWC=0
                         Ps2FastWrite32(rdram, gifChainAddr + 4u, gifDataAddr); // ADDR
 
                         // GIF packet: 1 GIFtag (NLOOP=10,EOP=1,PACKED,NREG=1,REGS=A+D)
@@ -541,15 +788,15 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                         Ps2FastWrite32(rdram, 0x382B80u, modBase);
                         Ps2FastWrite32(rdram, modBase + 0x27Cu, modVTable);
                         Ps2FastWrite32(rdram, modVTable + 0x30u, 0x00FFF400u);
-                        // sub_237640 reads mem[modVTable+0x9C] and jalrs to it.
-                        // Point at the same zero-return sentinel so the call
-                        // is a no-op instead of jumping to mem[0x9C] junk.
-                        Ps2FastWrite32(rdram, modVTable + 0x9Cu, 0x00FFF400u);
+                    // sub_237640 reads mem[modVTable+0x9C] and jalrs to it.
+                    // That callback must report success; otherwise the real
+                    // render-infrastructure init path is skipped.
+                    Ps2FastWrite32(rdram, modVTable + 0x9Cu, 0x00FFF510u);
                         std::cout << "[Bootstrap] Faked module-vtable chain "
                                      "[0x382B80] -> 0x" << std::hex << modBase
                                   << " [+0x27C] -> 0x" << modVTable
-                                  << " [+0x30] -> 0xFFF400, [+0x9C] -> 0xFFF400 "
-                                  << "(zero-return sentinel)"
+                                  << " [+0x30] -> 0xFFF400, [+0x9C] -> 0xFFF510 "
+                                  << "(success sentinel)"
                                   << std::dec << std::endl;
                     }
 
@@ -652,21 +899,29 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     const uint32_t stateTablePtr = *(uint32_t*)(rdram + stateTableAddr);
                     if (stateTablePtr != 0u && stateTablePtr != 0xFFFFFFFFu) {
                         const uint32_t state6Addr = stateTablePtr + 6u * 4u;
-                        *(uint32_t*)(rdram + state6Addr) = 0xFFF200u;
-                        std::cout << "[Bootstrap] Armed module state[6]=0xFFF200"
-                                  << " at rdram[0x" << std::hex << state6Addr
-                                  << "] (stateTP=0x" << stateTablePtr << ")"
-                                  << std::dec << std::endl;
-                        // Signal module-6 "IOP init done" immediately so the
-                        // 0xFFF200 sentinel writes state[6]=-1 on its first call,
-                        // completing module-6 boot cleanly.  Previously this was
-                        // triggered by sif_dmaSend call#3, but with render jobs now
-                        // going through the EE renderer (0x308D08), sif_dmaSend is
-                        // no longer called from the per-frame render path.
-                        s_iop_init_done.store(1u, std::memory_order_release);
-                        std::cout << "[Bootstrap] s_iop_init_done set immediately"
-                                     " (EE renderer path; no sif_dmaSend needed)"
-                                  << std::endl;
+                        if (s_real_asset_path_mode.load(std::memory_order_acquire) != 0u) {
+                            std::cout << "[Bootstrap] real-asset-path: leaving state[6]=0x"
+                                      << std::hex << Ps2FastRead32(rdram, state6Addr)
+                                      << " at rdram[0x" << state6Addr << "]"
+                                      << " (stateTP=0x" << stateTablePtr << ")"
+                                      << std::dec << std::endl;
+                        } else {
+                            *(uint32_t*)(rdram + state6Addr) = 0xFFF200u;
+                            std::cout << "[Bootstrap] Armed module state[6]=0xFFF200"
+                                      << " at rdram[0x" << std::hex << state6Addr
+                                      << "] (stateTP=0x" << stateTablePtr << ")"
+                                      << std::dec << std::endl;
+                            // Signal module-6 "IOP init done" immediately so the
+                            // 0xFFF200 sentinel writes state[6]=-1 on its first call,
+                            // completing module-6 boot cleanly.  Previously this was
+                            // triggered by sif_dmaSend call#3, but with render jobs now
+                            // going through the EE renderer (0x308D08), sif_dmaSend is
+                            // no longer called from the per-frame render path.
+                            s_iop_init_done.store(1u, std::memory_order_release);
+                            std::cout << "[Bootstrap] s_iop_init_done set immediately"
+                                         " (EE renderer path; no sif_dmaSend needed)"
+                                      << std::endl;
+                        }
                     } else {
                         std::cout << "[Bootstrap] WARNING: stateTablePtr=0x"
                                   << std::hex << stateTablePtr
@@ -690,10 +945,17 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 // sibling assumption.  This is purely diagnostic — if it
                 // produces a crash we revert; if it advances the pipeline,
                 // we've unblocked one more downstream gate.
-                Ps2FastWrite32(rdram, 0x43AA04u, 0x100u);
-                Ps2FastWrite32(rdram, 0x43FA08u, 0x100u);
-                std::cout << "[Bootstrap] CDVD-stub: capA=capB=0x100 written "
-                             "(unlocks VIF1 buildPacket capacity gate)" << std::endl;
+                if (s_real_asset_path_mode.load(std::memory_order_acquire) != 0u) {
+                    std::cout << "[Bootstrap] real-asset-path: leaving capA=0x"
+                              << std::hex << Ps2FastRead32(rdram, 0x43AA04u)
+                              << " capB=0x" << Ps2FastRead32(rdram, 0x43FA08u)
+                              << std::dec << std::endl;
+                } else {
+                    Ps2FastWrite32(rdram, 0x43AA04u, 0x100u);
+                    Ps2FastWrite32(rdram, 0x43FA08u, 0x100u);
+                    std::cout << "[Bootstrap] CDVD-stub: capA=capB=0x100 written "
+                                 "(unlocks VIF1 buildPacket capacity gate)" << std::endl;
+                }
 
                 // Debug dump after all initialization
                 dumpGsState();
@@ -903,7 +1165,56 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
 
                     auto fn = runtime->lookupFunction(stateFunc);
                     if (fn) {
+                        if (stateFunc == 0x31d200u) {
+                            static std::atomic<uint32_t> s_d200FrameLogs{0};
+                            const uint32_t logN =
+                                s_d200FrameLogs.fetch_add(1u, std::memory_order_relaxed);
+                            if (logN < 8u || (logN % 120u) == 0u) {
+                                R5900Context* d200Ctx = &frameCtx;
+                                const uint32_t a0 = GPR_U32(d200Ctx, 4);
+                                const uint32_t gp = GPR_U32(d200Ctx, 28);
+                                const uint32_t sp = GPR_U32(d200Ctx, 29);
+                                const uint32_t ra = GPR_U32(d200Ctx, 31);
+                                uint32_t bitBuf = 0u;
+                                uint32_t bitPos = 0u;
+                                uint32_t outPtr = 0u;
+                                uint32_t outIdx = 0u;
+                                if (a0 >= 0x100000u && a0 + 0x16D0u < 0x02000000u) {
+                                    outPtr = *(uint32_t*)(rdram + a0 + 0x0008u);
+                                    outIdx = *(uint32_t*)(rdram + a0 + 0x0010u);
+                                    bitBuf = *(uint32_t*)(rdram + a0 + 0x16C8u);
+                                    bitPos = *(uint32_t*)(rdram + a0 + 0x16CCu);
+                                }
+                                printf("[D200State:pre] n=%u a0=0x%08x gp=0x%08x sp=0x%08x ra=0x%08x "
+                                       "outPtr=0x%08x outIdx=0x%08x bitBuf=0x%08x bitPos=0x%08x\n",
+                                       logN, a0, gp, sp, ra, outPtr, outIdx, bitBuf, bitPos);
+                                fflush(stdout);
+                            }
+                        }
                         fn(rdram, &frameCtx, runtime);
+                        if (stateFunc == 0x31d200u) {
+                            static std::atomic<uint32_t> s_d200ReturnLogs{0};
+                            const uint32_t logN =
+                                s_d200ReturnLogs.fetch_add(1u, std::memory_order_relaxed);
+                            if (logN < 8u || (logN % 120u) == 0u) {
+                                R5900Context* d200Ctx = &frameCtx;
+                                const uint32_t a0 = GPR_U32(d200Ctx, 4);
+                                const uint32_t v0 = GPR_U32(d200Ctx, 2);
+                                uint32_t bitBuf = 0u;
+                                uint32_t bitPos = 0u;
+                                uint32_t outIdx = 0u;
+                                if (a0 >= 0x100000u && a0 + 0x16D0u < 0x02000000u) {
+                                    outIdx = *(uint32_t*)(rdram + a0 + 0x0010u);
+                                    bitBuf = *(uint32_t*)(rdram + a0 + 0x16C8u);
+                                    bitPos = *(uint32_t*)(rdram + a0 + 0x16CCu);
+                                }
+                                printf("[D200State:post] n=%u pc=0x%08x a0=0x%08x v0=0x%08x "
+                                       "outIdx=0x%08x bitBuf=0x%08x bitPos=0x%08x stateMem=0x%08x\n",
+                                       logN, frameCtx.pc, a0, v0, outIdx, bitBuf, bitPos,
+                                       *(uint32_t*)(rdram + 0x384670u));
+                                fflush(stdout);
+                            }
+                        }
                     } else {
                         static uint32_t s_missingFn = 0u;
                         if (stateFunc != s_missingFn) {
@@ -932,69 +1243,10 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                 }
             }
 
-            // CYCLE 28 PHASE 34 — sub_31D200 bridge experiment
-            //
-            // Phase 33 confirmed:
-            //   - modTable[0] = 22 (gate is open, set at frame=61)
-            //   - sub_31D200 is the ONLY function that writes 0x384670
-            //     (the game state fn ptr) and reads modTable[0]
-            //   - sub_31D200 never runs because gs_initState (0x251B10)
-            //     is the currently-installed state and only sub_31D200
-            //     can install a new one
-            //
-            // Bridge: invoke sub_31D200 from the frame loop ONCE
-            // (after first FrameDiag).  Expected: it dispatches based
-            // on modTable[0]=22, installs a new state function, returns.
-            // Next frame's stateFunc lookup picks up the new pointer
-            // and the plateau breaks.
-            //
-            // Risk: sub_31D200 is 748KB of game logic.  If it accesses
-            // uninitialized state (which is likely — boot subsystems
-            // are stubbed), it could crash.  Wrapped in try/catch to
-            // observe behavior without killing the runtime.
-            {
-                static std::atomic<bool> s_d200Tried{false};
-                if (s_frameCount >= 90u && !s_d200Tried.exchange(true)) {
-                    std::cout << "[BridgeExp] frame=" << s_frameCount
-                              << " calling sub_31D200(pc=0x31d200)..."
-                              << std::endl;
-                    R5900Context d200Ctx{};
-                    SET_GPR_U32(&d200Ctx, 29, 0x44BC80u); // $sp = EE stack
-                    SET_GPR_U32(&d200Ctx, 28, *(uint32_t*)(rdram + 0x100008u)); // $gp from _start
-                    SET_GPR_U32(&d200Ctx, 31, 0u);         // $ra = 0
-                    d200Ctx.pc = 0x31d200u;
-                    try {
-                        auto fn = runtime->lookupFunction(0x31d200u);
-                        if (fn) {
-                            fn(rdram, &d200Ctx, runtime);
-                            const uint32_t newGameState =
-                                *(uint32_t*)(rdram + 0x384670u);
-                            std::cout << "[BridgeExp] sub_31D200 returned cleanly"
-                                      << "; new 0x384670=0x"
-                                      << std::hex << newGameState << std::dec
-                                      << std::endl;
-                            // Phase 35: install sub_31D200 AS the per-frame
-                            // state function.  The natural game-logic dispatch
-                            // pattern: state func runs every frame, checks
-                            // modTable[0], dispatches.  Force-install to break
-                            // the chicken-and-egg.
-                            if (newGameState == 0x251b10u) {
-                                std::cout << "[BridgeExp] forcing 0x384670=0x31D200"
-                                             " (game-logic state-fn install)"
-                                          << std::endl;
-                                *(uint32_t*)(rdram + 0x384670u) = 0x31d200u;
-                            }
-                        } else {
-                            std::cout << "[BridgeExp] no function at 0x31d200!"
-                                      << std::endl;
-                        }
-                    } catch (const std::exception& e) {
-                        std::cout << "[BridgeExp] sub_31D200 threw: " << e.what()
-                                  << " pc=0x" << std::hex << d200Ctx.pc
-                                  << std::dec << std::endl;
-                    }
-                }
-            }
+            // The old sub_31D200 bridge experiment is intentionally disabled.
+            // VA 0x31D200 decoded as a helper that expects a valid object in $a0;
+            // force-installing it as the per-frame state only calls it with the
+            // frame loop's dummy context and prevents real loader/state progress.
 
             // CYCLE 28 PHASE 8 — VIF1_MARK force-engage experiment (reverted)
             //
@@ -1041,6 +1293,7 @@ static void gameFrameLoop(uint8_t* rdram, PS2Runtime* runtime)
                     }
                 }
             }
+
         }
     }
 }
@@ -1091,12 +1344,15 @@ void entry_point_sentinel(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime
 //                           cycles, not VBlank ticks).
 //   --screenshot PATH       Take a host-window screenshot just before stop.
 //   --runtime-seconds N     Wall-clock watchdog; calls requestStop() after N.
+//   --real-asset-path       Disable bootstrap shortcuts that fake IOP/CDVD
+//                           completion; used to find the real asset-load path.
 // Positional arg is still the optional ELF path.
 // ---------------------------------------------------------------------------
 struct CliArgs
 {
     std::string elfPath;
     bool        headless         = false;
+    bool        realAssetPath    = false;
     uint64_t    framesLimit      = 0;     // 0 = unlimited
     std::string screenshotPath;
     uint32_t    runtimeSeconds   = 0;     // 0 = unlimited
@@ -1109,6 +1365,7 @@ static CliArgs parseArgs(int argc, char* argv[])
     {
         std::string_view s(argv[i]);
         if (s == "--headless") { a.headless = true; }
+        else if (s == "--real-asset-path") { a.realAssetPath = true; }
         else if (s == "--frames" && i + 1 < argc) { a.framesLimit = std::stoull(argv[++i]); }
         else if (s == "--screenshot" && i + 1 < argc) { a.screenshotPath = argv[++i]; }
         else if (s == "--runtime-seconds" && i + 1 < argc) { a.runtimeSeconds = (uint32_t)std::stoul(argv[++i]); }
@@ -1149,8 +1406,13 @@ int main(int argc, char* argv[])
         std::cerr << "ELF not found: " << elfPath << std::endl;
         std::cerr << "Usage: " << argv[0] << " [path/to/SLUS_202.68] "
                   << "[--headless] [--frames N] [--screenshot PATH] "
-                  << "[--runtime-seconds N]" << std::endl;
+                  << "[--runtime-seconds N] [--real-asset-path]" << std::endl;
         return 1;
+    }
+
+    s_real_asset_path_mode.store(cli.realAssetPath ? 1u : 0u, std::memory_order_release);
+    if (cli.realAssetPath) {
+        std::cout << "[Mode] real asset path: bootstrap IOP/CDVD shortcuts disabled" << std::endl;
     }
 
     if (cli.headless)
@@ -1322,6 +1584,32 @@ int main(int argc, char* argv[])
         // via SetSyscall (0x80076440 → entry in overlay_kernel_76, etc.).
         // The old MIPS interpreter approach was removed when the overlay recompile
         // shipped (Foundation item #6, 2026-04-17).
+        auto ksegInterp = +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            interpretMipsKseg0(rdram, ctx, runtime, ctx->pc);
+        };
+        runtime.registerFunction(0x80074000u, ksegInterp);
+        runtime.registerFunction(0x80074088u, ksegInterp);
+        runtime.registerFunction(0x80074138u, ksegInterp);
+        runtime.registerFunction(0x80075000u, ksegInterp);
+        runtime.registerFunction(0x80075038u, ksegInterp);
+        runtime.registerFunction(0x800750C8u, ksegInterp);
+        runtime.registerFunction(0x80075108u, ksegInterp);
+        runtime.registerFunction(0x80075158u, ksegInterp);
+        runtime.registerFunction(0x800751A8u, ksegInterp);
+        runtime.registerFunction(0x80076000u, ksegInterp);
+        runtime.registerFunction(0x800762A0u, ksegInterp);
+        runtime.registerFunction(0x80076440u, ksegInterp);
+        runtime.registerFunction(0x80076488u, ksegInterp);
+        runtime.registerFunction(0x800766C0u, ksegInterp);
+
+        // The 0x56 custom syscall table can transiently hold this RAM alias
+        // before the copied 0x800750C8 TLBWI handler is installed. Its contract
+        // matches overlay_kernel_75's TLBWI entry for valid indices: return a0.
+        runtime.registerFunction(0x01F20000u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+            const uint32_t index = GPR_U32(ctx, 4);
+            SET_GPR_S32(ctx, 2, index < 48u ? (int32_t)index : -1);
+            ctx->pc = GPR_U32(ctx, 31);
+        });
 
         // 0x251DF0  vif1_frameSubmit
         // Per-frame VIF1 DMA handler — the "render" half of sub_00251A20.
@@ -1431,12 +1719,359 @@ int main(int argc, char* argv[])
             s_lastState = stateFunc;
         }
 
+        if (originalA0 == 6u) {
+            const uint32_t stateTablePtr = Ps2FastRead32(rdram, 0x385334u);
+            if (stateTablePtr >= 0x00100000u && stateTablePtr + 28u < 0x02000000u) {
+                Ps2FastWrite32(rdram, stateTablePtr + 24u, 0xFFFFFFFFu);
+                printf("[setGameState] module 6 state callback completed; state[6]=-1\n");
+                fflush(stdout);
+            }
+        }
+
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
     });
 
     // sub_002EB0C8: real generated code now runs (was TODO stub; 2F6030/2F60C0 un-stubbed from TOML).
     // Calls sub_002EB050 (get GS state @ 0x383760), reads mem[0x383768], then calls
     // sub_002F6030 (GIF DMA sync/submit when flag=0) or sub_002F60C0 (flag!=0).
+
+    {
+        extern void sub_002FD7E8_0x2fd7e8(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x2FD7E8u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            const uint32_t a0 = GPR_U32(ctx, 4);
+            const uint32_t a1 = GPR_U32(ctx, 5);
+            const uint32_t a2 = GPR_U32(ctx, 6);
+            const auto s0 = guest_cstr(rdram, a0);
+            const auto s1 = guest_cstr(rdram, a1);
+            static std::atomic<uint32_t> s_count{0};
+            const uint32_t n = s_count.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 16u) {
+                printf("[IopLoadTrace 0x2FD7E8] n=%u a0=0x%08X '%s' a1=0x%08X '%s' a2=0x%08X ra=0x%08X\n",
+                       n, a0, s0.c_str(), a1, s1.c_str(), a2, GPR_U32(ctx, 31));
+                fflush(stdout);
+            }
+            const uint32_t returnPc = GPR_U32(ctx, 31);
+            ctx->pc = 0x2FD7E8u;
+            for (uint32_t dispatchCount = 0; dispatchCount < 4096u; ++dispatchCount) {
+                const uint32_t entryPc = ctx->pc;
+                if (entryPc == 0x2FD7E8u) {
+                    sub_002FD7E8_0x2fd7e8(rdram, ctx, runtime);
+                } else {
+                    auto targetFn = runtime->lookupFunction(entryPc);
+                    targetFn(rdram, ctx, runtime);
+                }
+                if (ctx->pc == returnPc) {
+                    break;
+                }
+            }
+            if (n < 16u) {
+                printf("[IopLoadTrace 0x2FD7E8] n=%u ret=0x%08X pc=0x%08X\n",
+                       n, GPR_U32(ctx, 2), ctx->pc);
+                fflush(stdout);
+            }
+            if (GPR_S32(ctx, 2) >= 0 && s0.find("PS2SOUND.IRX") != std::string::npos) {
+                if (s_real_asset_path_mode.load(std::memory_order_acquire) != 0u) {
+                    printf("[IopLoadTrace 0x2FD7E8] IOP IRX chain complete; real-asset-path leaves module 6 state to natural event path\n");
+                    fflush(stdout);
+                    return;
+                }
+                const uint32_t stateTablePtr = Ps2FastRead32(rdram, 0x385334u);
+                if (stateTablePtr >= 0x00100000u && stateTablePtr + 28u < 0x02000000u) {
+                    Ps2FastWrite32(rdram, stateTablePtr + 24u, 0x002FDDF8u);
+                    s_iop_init_done.store(1u, std::memory_order_release);
+                    printf("[IopLoadTrace 0x2FD7E8] IOP IRX chain complete; queued module 6 callback state[6]=0x2FDDF8\n");
+                    fflush(stdout);
+                }
+            }
+        });
+    }
+
+    {
+        extern void sub_002FCDE8_0x2fcde8(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002F8B60_0x2f8b60(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002F86B8_0x2f86b8(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002F5BA0_0x2f5ba0(uint8_t*, R5900Context*, PS2Runtime*);
+
+        runtime.registerFunction(0x2FCDE8u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 96u) {
+                printf("[RpcLoaderInit 2FCDE8:pre] n=%u a0=0x%08X a1=0x%08X ra=0x%08X cache=0x%08X poolCount=%u poolBase=0x%08X\n",
+                       n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 31),
+                       Ps2FastRead32(rdram, 0x384340u), Ps2FastRead32(rdram, 0x459408u),
+                       Ps2FastRead32(rdram, 0x459404u));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2FCDE8u;
+            sub_002FCDE8_0x2fcde8(rdram, ctx, runtime);
+            if (n < 24u) {
+                printf("[RpcLoaderInit 2FCDE8:post] n=%u ret=0x%08X pc=0x%08X cache=0x%08X client.server=0x%08X client.sem=0x%08X\n",
+                       n, GPR_U32(ctx, 2), ctx->pc, Ps2FastRead32(rdram, 0x384340u),
+                       Ps2FastRead32(rdram, 0x45ABC0u), Ps2FastRead32(rdram, 0x45ABE4u));
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x2F8B60u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t out = GPR_U32(ctx, 4);
+            if (n < 32u) {
+                printf("[RpcAlloc 2F8B60:pre] n=%u out=0x%08X sid=0x%08X flags=0x%08X ra=0x%08X poolUsed=%u poolBase=0x%08X\n",
+                       n, out, GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 31),
+                       Ps2FastRead32(rdram, 0x459408u), Ps2FastRead32(rdram, 0x459404u));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F8B60u;
+            sub_002F8B60_0x2f8b60(rdram, ctx, runtime);
+            if (n < 32u) {
+                printf("[RpcAlloc 2F8B60:post] n=%u ret=0x%08X pc=0x%08X out0=0x%08X out4=0x%08X out8=0x%08X out24=0x%08X poolUsed=%u\n",
+                       n, GPR_U32(ctx, 2), ctx->pc,
+                       (out >= 0x100000u && out + 0x28u < 0x02000000u) ? Ps2FastRead32(rdram, out + 0u) : 0u,
+                       (out >= 0x100000u && out + 0x28u < 0x02000000u) ? Ps2FastRead32(rdram, out + 4u) : 0u,
+                       (out >= 0x100000u && out + 0x28u < 0x02000000u) ? Ps2FastRead32(rdram, out + 8u) : 0u,
+                       (out >= 0x100000u && out + 0x28u < 0x02000000u) ? Ps2FastRead32(rdram, out + 0x24u) : 0u,
+                       Ps2FastRead32(rdram, 0x459408u));
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x2F86B8u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t pool = GPR_U32(ctx, 4);
+            const uint32_t returnPc = GPR_U32(ctx, 31);
+            if (n < 32u) {
+                printf("[RpcPoolGet 2F86B8:pre] n=%u pool=0x%08X used=%u base=0x%08X firstFlags=0x%08X ra=0x%08X\n",
+                       n, pool,
+                       (pool >= 0x100000u && pool + 0x10u < 0x02000000u) ? Ps2FastRead32(rdram, pool + 8u) : 0u,
+                       (pool >= 0x100000u && pool + 0x10u < 0x02000000u) ? Ps2FastRead32(rdram, pool + 4u) : 0u,
+                       Ps2FastRead32(rdram, 0x459410u), returnPc);
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F86B8u;
+            for (uint32_t dispatchCount = 0u; dispatchCount < 4096u; ++dispatchCount) {
+                const uint32_t entryPc = ctx->pc;
+                if (entryPc >= 0x002F86B8u && entryPc < 0x002F8760u) {
+                    sub_002F86B8_0x2f86b8(rdram, ctx, runtime);
+                } else if (runtime->hasFunction(entryPc)) {
+                    auto targetFn = runtime->lookupFunction(entryPc);
+                    targetFn(rdram, ctx, runtime);
+                } else {
+                    break;
+                }
+                if (ctx->pc == returnPc) {
+                    break;
+                }
+            }
+            if (n < 32u) {
+                printf("[RpcPoolGet 2F86B8:post] n=%u ret=0x%08X pc=0x%08X used=%u\n",
+                       n, GPR_U32(ctx, 2), ctx->pc,
+                       (pool >= 0x100000u && pool + 0x10u < 0x02000000u) ? Ps2FastRead32(rdram, pool + 8u) : 0u);
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x2F5BA0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t semaParam = GPR_U32(ctx, 4);
+            if (n < 32u) {
+                printf("[CreateSemaWrap 2F5BA0:pre] n=%u param=0x%08X init=%u max=%u opt=0x%08X ra=0x%08X\n",
+                       n, semaParam,
+                       (semaParam >= 0x100000u && semaParam + 12u < 0x02000000u) ? Ps2FastRead32(rdram, semaParam + 4u) : 0u,
+                       (semaParam >= 0x100000u && semaParam + 12u < 0x02000000u) ? Ps2FastRead32(rdram, semaParam + 8u) : 0u,
+                       (semaParam >= 0x100000u && semaParam + 12u < 0x02000000u) ? Ps2FastRead32(rdram, semaParam + 0u) : 0u,
+                       GPR_U32(ctx, 31));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F5BA0u;
+            sub_002F5BA0_0x2f5ba0(rdram, ctx, runtime);
+            if (n < 32u) {
+                printf("[CreateSemaWrap 2F5BA0:post] n=%u ret=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+                fflush(stdout);
+            }
+        });
+
+        extern void sub_002F8D30_0x2f8d30(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002F8298_0x2f8298(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002F8160_0x2f8160(uint8_t*, R5900Context*, PS2Runtime*);
+
+        runtime.registerFunction(0x2F8D30u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t out = GPR_U32(ctx, 4);
+            const uint32_t sid = GPR_U32(ctx, 5);
+            const uint32_t flags = GPR_U32(ctx, 6);
+            const uint32_t recv = GPR_U32(ctx, 7);
+            const uint32_t recvSize = GPR_U32(ctx, 8);
+            const uint32_t send = GPR_U32(ctx, 9);
+            const uint32_t sendSize = GPR_U32(ctx, 10);
+            const uint32_t returnPc = GPR_U32(ctx, 31);
+            if (n < 32u) {
+                printf("[RpcCreate 2F8D30:pre] n=%u out=0x%08X sid=0x%08X flags=0x%08X recv=0x%08X recvSize=%u send=0x%08X sendSize=%u ra=0x%08X\n",
+                       n, out, sid, flags, recv, recvSize, send, sendSize, returnPc);
+                if (sid == 1u || returnPc == 0x267AA0u) {
+                    trace_guest_bytes("[RpcCreate 2F8D30:send-pre]", rdram, send, sendSize);
+                    trace_guest_bytes("[RpcCreate 2F8D30:recv-pre]", rdram, recv, recvSize);
+                }
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F8D30u;
+            for (uint32_t dispatchCount = 0u; dispatchCount < 4096u; ++dispatchCount) {
+                const uint32_t entryPc = ctx->pc;
+                if (entryPc == 0x2F8D30u) {
+                    sub_002F8D30_0x2f8d30(rdram, ctx, runtime);
+                } else {
+                    auto targetFn = runtime->lookupFunction(entryPc);
+                    targetFn(rdram, ctx, runtime);
+                }
+                if (ctx->pc == returnPc) {
+                    break;
+                }
+            }
+            if (sid == 1u && out == 0x00450100u && recv == 0x00450270u &&
+                send == 0x004503B0u && sendSize >= 4u && returnPc == 0x00267AA0u) {
+                // sub_00267910 reads this word immediately after the RPC and
+                // treats 0x020E as the successful IOP-side peripheral response.
+                Ps2FastWrite32(rdram, send, 0x0000020Eu);
+                if (n < 32u) {
+                    printf("[RpcCreate 2F8D30:synth] n=%u PS2 peripheral RPC status=0x020E\n", n);
+                }
+            }
+            if (n < 32u) {
+                const bool validOut = (out >= 0x100000u && out + 0x34u < 0x02000000u);
+                printf("[RpcCreate 2F8D30:post] n=%u ret=0x%08X pc=0x%08X out0=0x%08X out4=0x%08X out8=0x%08X out24=0x%08X out30=0x%08X\n",
+                       n, GPR_U32(ctx, 2), ctx->pc,
+                       validOut ? Ps2FastRead32(rdram, out + 0u) : 0u,
+                       validOut ? Ps2FastRead32(rdram, out + 4u) : 0u,
+                       validOut ? Ps2FastRead32(rdram, out + 8u) : 0u,
+                       validOut ? Ps2FastRead32(rdram, out + 0x24u) : 0u,
+                       validOut ? Ps2FastRead32(rdram, out + 0x30u) : 0u);
+                if (sid == 1u || returnPc == 0x267AA0u) {
+                    trace_guest_bytes("[RpcCreate 2F8D30:send-post]", rdram, send, sendSize);
+                    trace_guest_bytes("[RpcCreate 2F8D30:recv-post]", rdram, recv, recvSize);
+                }
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x2F8298u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t cmd = GPR_U32(ctx, 4);
+            const uint32_t packet = GPR_U32(ctx, 5);
+            const uint32_t recvArg = GPR_U32(ctx, 7);
+            if (n < 24u) {
+                printf("[SifSendHelper 2F8298:pre] n=%u cmd=0x%08X packet=0x%08X size=%u a3=0x%08X t0=0x%08X t1=0x%08X ra=0x%08X flag447A58=0x%08X flag447A60=0x%08X\n",
+                       n, cmd, packet, GPR_U32(ctx, 6), GPR_U32(ctx, 7),
+                       GPR_U32(ctx, 8), GPR_U32(ctx, 9), GPR_U32(ctx, 31),
+                       Ps2FastRead32(rdram, 0x447A58u), Ps2FastRead32(rdram, 0x447A60u));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F8298u;
+            sub_002F8298_0x2f8298(rdram, ctx, runtime);
+            const uint32_t sendRet = GPR_U32(ctx, 2);
+            if ((cmd == 0x8000000Au || cmd == 0x80000009u) && sendRet != 0u) {
+                const uint32_t client = Ps2FastRead32(rdram, packet + 0x1Cu);
+                const uint32_t semaId = Ps2FastRead32(rdram, client + 0x08u);
+                if (cmd == 0x80000009u) {
+                    Ps2FastWrite32(rdram, client + 0x24u, 1u);
+                } else if (cmd == 0x8000000Au && client == 0x0044ABC0u) {
+                    static std::atomic<uint32_t> s_iopModuleId{2};
+                    const uint32_t recv = recvArg;
+                    if (recv == 0x0044A9C0u) {
+                        Ps2FastWrite32(rdram, recv + 0u, s_iopModuleId.fetch_add(1u, std::memory_order_relaxed));
+                        Ps2FastWrite32(rdram, recv + 4u, 0u);
+                    }
+                } else if (cmd == 0x8000000Au && client == 0x0044C480u) {
+                    // sub_00314020 sends RPC 0xFE to the GFX IOP service and
+                    // accepts the reply only when recv[4] >= 0x20A and
+                    // recv[8] >= 0x20E; recv[0] is returned to boot_subinit.
+                    Ps2FastWrite32(rdram, 0x0044DA40u, 1u);
+                    Ps2FastWrite32(rdram, 0x0044DA44u, 0x0000020Au);
+                    Ps2FastWrite32(rdram, 0x0044DA48u, 0x0000020Eu);
+                } else if (cmd == 0x8000000Au && client == 0x0044DB20u && recvArg == 0x0044DB80u) {
+                    // 0x315C40 returns recv[0]; 0x315800 treats a high byte of 3
+                    // as the IOP GFX module-ready status.
+                    Ps2FastWrite32(rdram, recvArg + 0u, 0x00000300u);
+                }
+                const uint32_t savedPc = ctx->pc;
+                const uint32_t savedA0 = GPR_U32(ctx, 4);
+                const uint32_t savedV0 = GPR_U32(ctx, 2);
+                SET_GPR_U32(ctx, 4, semaId);
+                runtime->handleSyscall(rdram, ctx, 0x42u);
+                const uint32_t signalRet = GPR_U32(ctx, 2);
+                SET_GPR_U32(ctx, 4, savedA0);
+                SET_GPR_U32(ctx, 2, savedV0);
+                ctx->pc = savedPc;
+                if (n < 96u) {
+                    const bool validRecv = recvArg >= 0x100000u && recvArg + 8u < 0x02000000u;
+                    printf("[SifSendHelper 2F8298:rpc-complete] n=%u cmd=0x%08X packet=0x%08X client=0x%08X sema=%u signalRet=0x%08X recv=0x%08X recv0=0x%08X recv4=0x%08X client24=0x%08X\n",
+                           n, cmd, packet, client, semaId, signalRet,
+                           recvArg,
+                           validRecv ? Ps2FastRead32(rdram, recvArg + 0u) : 0u,
+                           validRecv ? Ps2FastRead32(rdram, recvArg + 4u) : 0u,
+                           (client >= 0x100000u && client + 0x28u < 0x02000000u) ? Ps2FastRead32(rdram, client + 0x24u) : 0u);
+                    fflush(stdout);
+                }
+            }
+            if (n < 96u) {
+                printf("[SifSendHelper 2F8298:post] n=%u ret=0x%08X pc=0x%08X flag447A58=0x%08X flag447A60=0x%08X\n",
+                       n, GPR_U32(ctx, 2), ctx->pc,
+                       Ps2FastRead32(rdram, 0x447A58u), Ps2FastRead32(rdram, 0x447A60u));
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x2F8160u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 24u) {
+                printf("[SifSendCore 2F8160:pre] n=%u cmd=0x%08X mode=%u packet=0x%08X size=%u a3=0x%08X t0=0x%08X t1=0x%08X ra=0x%08X\n",
+                       n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7),
+                       GPR_U32(ctx, 8), GPR_U32(ctx, 9), GPR_U32(ctx, 10), GPR_U32(ctx, 31));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F8160u;
+            sub_002F8160_0x2f8160(rdram, ctx, runtime);
+            if (n < 24u) {
+                printf("[SifSendCore 2F8160:post] n=%u ret=0x%08X pc=0x%08X flag447A58=0x%08X flag447A60=0x%08X\n",
+                       n, GPR_U32(ctx, 2), ctx->pc,
+                       Ps2FastRead32(rdram, 0x447A58u), Ps2FastRead32(rdram, 0x447A60u));
+                fflush(stdout);
+            }
+        });
+
+        extern void sub_002F8F20_0x2f8f20(uint8_t*, R5900Context*, PS2Runtime*);
+        auto register_rpc_list_entry = [&](uint32_t entry) {
+            runtime.registerFunction(entry, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                static std::atomic<uint32_t> s_n{0};
+                const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                const uint32_t entryPc = ctx->pc;
+                if (n < 32u) {
+                    printf("[RpcListEntry 2F8F20] n=%u entry=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X pool0=%u pool4=0x%08X pool8=%u list28=0x%08X\n",
+                           n, entryPc, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 31),
+                           Ps2FastRead32(rdram, 0x459400u), Ps2FastRead32(rdram, 0x459404u),
+                           Ps2FastRead32(rdram, 0x459408u), Ps2FastRead32(rdram, 0x459428u));
+                    fflush(stdout);
+                }
+                ctx->pc = entryPc;
+                sub_002F8F20_0x2f8f20(rdram, ctx, runtime);
+                if (n < 32u) {
+                    printf("[RpcListEntry 2F8F20] n=%u entry=0x%08X ret=0x%08X pc=0x%08X pool0=%u pool4=0x%08X pool8=%u list28=0x%08X\n",
+                           n, entryPc, GPR_U32(ctx, 2), ctx->pc,
+                           Ps2FastRead32(rdram, 0x459400u), Ps2FastRead32(rdram, 0x459404u),
+                           Ps2FastRead32(rdram, 0x459408u), Ps2FastRead32(rdram, 0x459428u));
+                    fflush(stdout);
+                }
+            });
+        };
+        register_rpc_list_entry(0x2F8F60u);
+        register_rpc_list_entry(0x2F8FF8u);
+        register_rpc_list_entry(0x2F90C8u);
+        register_rpc_list_entry(0x2F9160u);
+    }
 
     // --- 0x1000ac  _start tail-jump trampoline ---
     // _start contains: jal 0x239c40 [0x1000a4] / move $a0,$v0 [delay 0x1000a8] / j 0x2fea30 [0x1000ac]
@@ -1475,6 +2110,12 @@ int main(int argc, char* argv[])
         extern void sub_002B06F0_0x2b06f0(uint8_t*, R5900Context*, PS2Runtime*);
         extern void sub_002B0580_0x2b0580(uint8_t*, R5900Context*, PS2Runtime*);
         extern void sub_002B0370_0x2b0370(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002BAF90_0x2baf90(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002DE900_0x2de900(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002DE7C0_0x2de7c0(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_00308858_0x308858(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_003088C8_0x3088c8(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_00308A48_0x308a48(uint8_t*, R5900Context*, PS2Runtime*);
 
         #define CHAIN_TRACER(VA, NAME, REAL)                                       \
             runtime.registerFunction((VA),                                         \
@@ -1496,9 +2137,46 @@ int main(int argc, char* argv[])
         CHAIN_TRACER(0x2B06F0u, "sub_2B06F0", sub_002B06F0_0x2b06f0)
         CHAIN_TRACER(0x2B0580u, "sub_2B0580", sub_002B0580_0x2b0580)
         CHAIN_TRACER(0x2B0370u, "sub_2B0370", sub_002B0370_0x2b0370)
+        CHAIN_TRACER(0x2BAF90u, "parent sub_2BAF90", sub_002BAF90_0x2baf90)
+        CHAIN_TRACER(0x2DE900u, "parent sub_2DE900", sub_002DE900_0x2de900)
+        CHAIN_TRACER(0x2DE7C0u, "parent sub_2DE7C0", sub_002DE7C0_0x2de7c0)
 
         #undef CHAIN_TRACER
-        std::cout << "[Bootstrap] Installed 7 sub_31D200 chain tracers" << std::endl;
+
+        #define MODULE_TRACER(VA, NAME, REAL)                                      \
+            runtime.registerFunction((VA),                                         \
+                +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* rt) {           \
+                    static std::atomic<uint32_t> s_n{0};                           \
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);\
+                    const uint32_t mt = Ps2FastRead32(rdram, 0x38544Cu);           \
+                    const uint32_t st = (mt >= 0x00100000u && mt < 0x02000000u)    \
+                        ? Ps2FastRead32(rdram, mt + 0x1D4u) : 0u;                  \
+                    if (n < 12u || (n % 600u) == 0u) {                             \
+                        printf("[ModuleTrace] %s @0x%08X #%u a0=0x%08X a1=0x%08X "\
+                               "a2=0x%08X ra=0x%08X mt0=0x%08X st6=0x%08X\n",    \
+                               NAME, (VA), n, GPR_U32(ctx, 4), GPR_U32(ctx, 5),    \
+                               GPR_U32(ctx, 6), GPR_U32(ctx, 31),                  \
+                               (mt >= 0x00100000u && mt < 0x02000000u)             \
+                                   ? Ps2FastRead32(rdram, mt) : 0u,                \
+                               (st >= 0x00100000u && st + 0x18u < 0x02000000u)     \
+                                   ? Ps2FastRead32(rdram, st + 0x18u) : 0u);       \
+                        fflush(stdout);                                            \
+                    }                                                              \
+                    REAL(rdram, ctx, rt);                                          \
+                    if (n < 12u || (n % 600u) == 0u) {                             \
+                        printf("[ModuleTrace] %s @0x%08X #%u exit pc=0x%08X "\
+                               "v0=0x%08X\n", NAME, (VA), n, ctx->pc,             \
+                               GPR_U32(ctx, 2));                                   \
+                        fflush(stdout);                                            \
+                    }                                                              \
+                });
+
+        MODULE_TRACER(0x308858u, "stateTable_init", sub_00308858_0x308858)
+        MODULE_TRACER(0x3088C8u, "stateTable_set", sub_003088C8_0x3088c8)
+        MODULE_TRACER(0x308A48u, "stateTable_dispatch", sub_00308A48_0x308a48)
+
+        #undef MODULE_TRACER
+        std::cout << "[Bootstrap] Installed sub_31D200 chain/parent/module tracers" << std::endl;
     }
 
     // --- 0x00FFF100  vblank_notify (synthetic) ---
@@ -1526,14 +2204,135 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
-    // sub_2F5FB0 — syscall 0x7A wrapper. Called from sub_2FDCB0 which
-    // spins at sub_239C40:label_239d88 waiting for `(syscall_0x7A_result
-    // & 0x40000) != 0`. On real PS2 this is a SIF/IOP status bit set by
-    // the IOP after module init. Force-return a value with bit 0x40000
-    // set so the gate passes and boot proceeds to func_311DF0 →
-    // sub_237640 → sub_13FDA0 (the writer of 0x442F70).
-    runtime.registerFunction(0x2F5FB0, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        SET_GPR_S32(ctx, 2, 0x40000);
+    // sub_2F5FA0 / sub_2F5FB0 are the ELF's SIF register wrappers:
+    //   0x2F5FA0 -> syscall 0x79, used as sceSifSetReg(reg, value)
+    //   0x2F5FB0 -> syscall 0x7A, used as sceSifGetReg(reg)
+    //
+    // Register the wrappers directly so the boot loader's IOPRP transaction
+    // preserves the SIF status bits it writes.
+    runtime.registerFunction(0x2F5FA0, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t reg = GPR_U32(ctx, 4);
+        const uint32_t value = GPR_U32(ctx, 5);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        if (n < 64u) {
+            printf("[SIF 0x2F5FA0] n=%u SetReg reg=0x%08X value=0x%08X ra=0x%08X\n",
+                   n, reg, value, savedRa);
+            fflush(stdout);
+        }
+        ps2_stubs::sceSifSetReg(rdram, ctx, runtime);
+        if (n < 64u) {
+            printf("[SIF 0x2F5FA0] n=%u prev=0x%08X\n", n, GPR_U32(ctx, 2));
+            fflush(stdout);
+        }
+        ctx->pc = savedRa;
+    });
+    runtime.registerFunction(0x2F5FB0, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t reg = GPR_U32(ctx, 4);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        if (n < 64u) {
+            printf("[SIF 0x2F5FB0] n=%u GetReg reg=0x%08X ra=0x%08X\n",
+                   n, reg, savedRa);
+            fflush(stdout);
+        }
+        ps2_stubs::sceSifGetReg(rdram, ctx, runtime);
+        if (reg == 0x00000004u && s_ioprp_handshake_done.load(std::memory_order_acquire) != 0u) {
+            SET_GPR_U32(ctx, 2, GPR_U32(ctx, 2) | 0x00040000u);
+        }
+        if (n < 64u) {
+            printf("[SIF 0x2F5FB0] n=%u value=0x%08X\n", n, GPR_U32(ctx, 2));
+            fflush(stdout);
+        }
+        ctx->pc = savedRa;
+    });
+
+    // Interior syscall wrappers inside sub_002F5FB0/sub_002F5FD0. The
+    // analyzer grouped several tiny wrappers into two functions, but game code
+    // can call the interior labels directly. Register them explicitly so SIF
+    // RPC calls like sceSifBindRpc reach the runtime syscall dispatcher.
+    runtime.registerFunction(0x2F5FC0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 16u) {
+            printf("[SIF 0x2F5FC0] n=%u DmaStat/SIF-event a0=0x%08X a1=0x%08X ra=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 31),
+                   Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 3, 0x7Bu);
+        runtime->handleSyscall(rdram, ctx, 0x0u);
+        if (n < 16u) {
+            printf("[SIF 0x2F5FC0] n=%u ret=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 2), Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+    runtime.registerFunction(0x2F5FD0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 16u) {
+            printf("[SIF 0x2F5FD0] n=%u syscall7C a0=0x%08X a1=0x%08X a2=0x%08X ra=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 31),
+                   Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 3, 0x7Cu);
+        runtime->handleSyscall(rdram, ctx, 0x0u);
+        if (n < 16u) {
+            printf("[SIF 0x2F5FD0] n=%u ret=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 2), Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+    runtime.registerFunction(0x2F5FE0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 16u) {
+            printf("[SIF 0x2F5FE0] n=%u syscall7D a0=0x%08X a1=0x%08X a2=0x%08X ra=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 31),
+                   Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 3, 0x7Du);
+        runtime->handleSyscall(rdram, ctx, 0x0u);
+        if (n < 16u) {
+            printf("[SIF 0x2F5FE0] n=%u ret=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 2), Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+    runtime.registerFunction(0x2F5FF0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t client = GPR_U32(ctx, 4);
+        const uint32_t sid = GPR_U32(ctx, 5);
+        const uint32_t mode = GPR_U32(ctx, 6);
+        if (n < 32u) {
+            printf("[SIF 0x2F5FF0] n=%u BindRpc client=0x%08X sid=0x%08X mode=0x%08X ra=0x%08X\n",
+                   n, client, sid, mode, GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 3, 0x7Eu);
+        runtime->handleSyscall(rdram, ctx, 0x0u);
+        if (n < 32u) {
+            uint32_t server = 0u;
+            uint32_t buf = 0u;
+            uint32_t cbuf = 0u;
+            if (client >= 0x100000u && client + 0x24u < 0x02000000u) {
+                server = Ps2FastRead32(rdram, client + 0x00u);
+                buf = Ps2FastRead32(rdram, client + 0x04u);
+                cbuf = Ps2FastRead32(rdram, client + 0x08u);
+            }
+            printf("[SIF 0x2F5FF0] n=%u ret=0x%08X server=0x%08X buf=0x%08X cbuf=0x%08X\n",
+                   n, GPR_U32(ctx, 2), server, buf, cbuf);
+            fflush(stdout);
+        }
         ctx->pc = GPR_U32(ctx, 31);
     });
 
@@ -1541,6 +2340,310 @@ int main(int argc, char* argv[])
     // sub_2F84F0 and label_239d88's spin). With TODO_NAMED throwing,
     // this terminates the boot thread before it can reach the sub_237640
     // → sub_13FDA0 chain. Force-return 0 so boot proceeds.
+    // sub_2F5B80 -- syscall 0x3E wrapper (EndOfHeap). The game's sbrk-style
+    // allocator at 0x2F62A0 compares its desired break against this value.
+    // Return the EE RAM limit so real heap growth is possible from 0x44F600.
+    runtime.registerFunction(0x2F6000u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        const uint32_t sp = GPR_U32(ctx, 29);
+        if (n < 64u) {
+            printf("[SIF 0x2F6000] n=%u CallRpc client=0x%08X rpc=0x%08X mode=0x%08X send=0x%08X "
+                   "r8=0x%08X r9=0x%08X r10=0x%08X r11=0x%08X sp=0x%08X ra=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7),
+                   GPR_U32(ctx, 8), GPR_U32(ctx, 9), GPR_U32(ctx, 10), GPR_U32(ctx, 11),
+                   sp, savedRa, Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        if (s_real_asset_path_mode.load(std::memory_order_acquire) != 0u &&
+            savedRa == 0x002FE0D0u &&
+            GPR_U32(ctx, 4) == 6u) {
+            SET_GPR_U32(ctx, 2, 0x02000000u);
+            if (n < 64u) {
+                printf("[SIF 0x2F6000] n=%u custom-event-pump module=%u -> 0x02000000\n",
+                       n, GPR_U32(ctx, 4));
+                fflush(stdout);
+            }
+            ctx->pc = savedRa;
+            return;
+        }
+        SET_GPR_U32(ctx, 3, 0x7Fu);
+        runtime->handleSyscall(rdram, ctx, 0x0u);
+        if (n < 64u) {
+            printf("[SIF 0x2F6000] n=%u ret=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 2), Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        ctx->pc = savedRa;
+    });
+    runtime.registerFunction(0x2F6010u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        const uint32_t callback = GPR_U32(ctx, 5);
+        if (n < 64u) {
+            printf("[SIF 0x2F6010] n=%u RpcCallback a0=0x%08X a1=0x%08X ra=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), savedRa, Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        if (callback >= 0x00100000u && callback < 0x00400000u && runtime->hasFunction(callback)) {
+            SET_GPR_U32(ctx, 31, savedRa);
+            ctx->pc = callback;
+            for (uint32_t dispatchCount = 0u; dispatchCount < 4096u; ++dispatchCount) {
+                const uint32_t entryPc = ctx->pc;
+                if (runtime->hasFunction(entryPc)) {
+                    auto targetFn = runtime->lookupFunction(entryPc);
+                    targetFn(rdram, ctx, runtime);
+                } else {
+                    break;
+                }
+                if (ctx->pc == entryPc && entryPc == callback) {
+                    ctx->pc = savedRa;
+                    break;
+                }
+                if (ctx->pc == savedRa) {
+                    break;
+                }
+            }
+            if (n < 64u) {
+                const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+                const uint32_t stateTable = (modTable >= 0x100000u && modTable + 0x1D8u < 0x02000000u)
+                    ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+                    : 0u;
+                printf("[SIF 0x2F6010] n=%u dispatched callback=0x%08X ret=0x%08X pc=0x%08X state6=0x%08X\n",
+                       n, callback, GPR_U32(ctx, 2), ctx->pc,
+                       (stateTable >= 0x100000u && stateTable + 28u < 0x02000000u)
+                           ? Ps2FastRead32(rdram, stateTable + 24u)
+                           : 0u);
+                fflush(stdout);
+            }
+            if (ctx->pc != savedRa) {
+                return;
+            }
+            return;
+        }
+        SET_GPR_U32(ctx, 3, 0x82u);
+        runtime->handleSyscall(rdram, ctx, 0x0u);
+        if (n < 64u) {
+            printf("[SIF 0x2F6010] n=%u ret=0x%08X flag44F588=0x%08X\n",
+                   n, GPR_U32(ctx, 2), Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        ctx->pc = savedRa;
+    });
+
+    extern void sub_00304448_0x304448(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x304448u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+        if (n < 16u) {
+            printf("[Event304448:pre] n=%u a0=0x%08X ra=0x%08X modTable=0x%08X state6=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 31), modTable,
+                   (Ps2FastRead32(rdram, modTable + 0x1D4u) >= 0x00100000u)
+                       ? Ps2FastRead32(rdram, Ps2FastRead32(rdram, modTable + 0x1D4u) + 0x18u)
+                       : 0u);
+            dump_event_list(rdram, "Event304448:list-pre", n, modTable);
+        }
+        ctx->pc = 0x304448u;
+        sub_00304448_0x304448(rdram, ctx, runtime);
+        if (n < 16u) {
+            printf("[Event304448:post] n=%u ret=0x%08X pc=0x%08X state6=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (Ps2FastRead32(rdram, modTable + 0x1D4u) >= 0x00100000u)
+                       ? Ps2FastRead32(rdram, Ps2FastRead32(rdram, modTable + 0x1D4u) + 0x18u)
+                       : 0u);
+            dump_event_list(rdram, "Event304448:list-post", n, modTable);
+        }
+    });
+
+    extern void sub_003051C8_0x3051c8(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x3051C8u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 16u) {
+            printf("[EventWalk3051C8:pre] n=%u a0=0x%08X cb=0x%08X ra=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 31));
+            dump_event_list(rdram, "EventWalk3051C8:list-pre", n, GPR_U32(ctx, 4));
+        }
+        ctx->pc = 0x3051C8u;
+        sub_003051C8_0x3051c8(rdram, ctx, runtime);
+        if (n < 16u) {
+            printf("[EventWalk3051C8:post] n=%u ret=0x%08X pc=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc);
+            dump_event_list(rdram, "EventWalk3051C8:list-post", n, GPR_U32(ctx, 4));
+        }
+    });
+
+    extern void sub_002FE020_0x2fe020(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x2FE020u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 96u) {
+            printf("[TRACE 2FE020] n=%u pc=0x%08X idx=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X t0=0x%08X ra=0x%08X\n",
+                   n, ctx->pc, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6),
+                   GPR_U32(ctx, 7), GPR_U32(ctx, 8), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        sub_002FE020_0x2fe020(rdram, ctx, runtime);
+        if (n < 96u) {
+            printf("[TRACE 2FE020] n=%u ret=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x2FE0C0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 64u) {
+            trace_event_table(rdram, "2FE0C0:pre", n);
+        }
+        ctx->pc = 0x2FE0C0u;
+        sub_002FE020_0x2fe020(rdram, ctx, runtime);
+        if (n < 64u) {
+            printf("[TRACE 2FE0C0] n=%u ret=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            trace_event_table(rdram, "2FE0C0:post", n);
+        }
+    });
+
+    runtime.registerFunction(0x2F7D10u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t fmt = GPR_U32(ctx, 4);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        if (n < 32u) {
+            const std::string text = guest_cstr(rdram, fmt, 160);
+            printf("[DebugFmt 0x2F7D10] n=%u fmt=0x%08X '%s' ra=0x%08X -> return\n",
+                   n, fmt, text.c_str(), savedRa);
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 2, 0u);
+        ctx->pc = savedRa;
+    });
+
+    extern void sub_002FE100_0x2fe100(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x2FE100u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 32u) {
+            printf("[TRACE 2FE100] n=%u entry pc=0x%08X ra=0x%08X sp=0x%08X\n",
+                   n, ctx->pc, GPR_U32(ctx, 31), GPR_U32(ctx, 29));
+            trace_event_table(rdram, "2FE100:pre", n);
+        }
+        ctx->pc = 0x2FE100u;
+        sub_002FE100_0x2fe100(rdram, ctx, runtime);
+        if (n < 32u) {
+            printf("[TRACE 2FE100] n=%u ret=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            trace_event_table(rdram, "2FE100:post", n);
+        }
+    });
+
+    extern void sub_002F5B80_0x2f5b80(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x2F5B80, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        const uint32_t ra = GPR_U32(ctx, 31);
+        if (ra == 0x002F62F8u) {
+            SET_GPR_U32(ctx, 2, 0x02000000u);
+            ctx->pc = ra;
+            return;
+        }
+        sub_002F5B80_0x2f5b80(rdram, ctx, runtime);
+    });
+
+    extern void sub_001028F0_0x1028f0(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_002665F0_0x2665f0(uint8_t*, R5900Context*, PS2Runtime*);
+    auto call_guest_func = [](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime,
+                              uint32_t entry, uint32_t retPc, auto fn) {
+        SET_GPR_U32(ctx, 31, retPc);
+        ctx->pc = entry;
+        fn(rdram, ctx, runtime);
+        if (ctx->pc == entry) {
+            ctx->pc = retPc;
+        }
+    };
+
+    runtime.registerFunction(0x1026D0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        const uint32_t obj = GPR_U32(ctx, 4);
+        const uint32_t ret = GPR_U32(ctx, 31);
+        WRITE32(obj + 0x2Cu, 0x003CC858u);
+
+        SET_GPR_U32(ctx, 4, obj);
+        SET_GPR_U32(ctx, 31, 0x001026F4u);
+        ctx->pc = 0x001028F0u;
+        sub_001028F0_0x1028f0(rdram, ctx, runtime);
+        if (ctx->pc != 0x001026F4u) {
+            return;
+        }
+
+        SET_GPR_U32(ctx, 4, obj + 0x14u);
+        SET_GPR_U32(ctx, 31, 0x00102700u);
+        ctx->pc = 0x001028F0u;
+        sub_001028F0_0x1028f0(rdram, ctx, runtime);
+        if (ctx->pc != 0x00102700u) {
+            return;
+        }
+
+        const uint8_t flags = static_cast<uint8_t>(READ8(obj + 0x28u) & 0xFEu);
+        WRITE8(obj + 0x28u, flags);
+        SET_GPR_U32(ctx, 2, obj);
+        ctx->pc = ret;
+    });
+
+    static std::atomic<uint32_t> s_ctor2329_obj{0};
+    static std::atomic<uint32_t> s_ctor2329_ret{0};
+    runtime.registerFunction(0x2329D0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        const uint32_t obj = s_ctor2329_obj.load(std::memory_order_relaxed);
+        const uint32_t ret = s_ctor2329_ret.load(std::memory_order_relaxed);
+        const uint8_t flags = static_cast<uint8_t>(READ8(obj + 0x28u) & 0xFEu);
+        WRITE8(obj + 0x28u, flags);
+        WRITE32(obj + 0x9918u, 0u);
+        SET_GPR_U32(ctx, 2, obj);
+        ctx->pc = ret;
+    });
+
+    runtime.registerFunction(0x2329A0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        const uint32_t obj = GPR_U32(ctx, 4);
+        const uint32_t ret = GPR_U32(ctx, 31);
+
+        SET_GPR_U32(ctx, 4, obj);
+        SET_GPR_U32(ctx, 31, 0x002329B4u);
+        ctx->pc = 0x001026D0u;
+        if (runtime->hasFunction(0x001026D0u)) {
+            runtime->lookupFunction(0x001026D0u)(rdram, ctx, runtime);
+        }
+        if (ctx->pc != 0x002329B4u) {
+            return;
+        }
+
+        WRITE32(obj + 0x2Cu, 0x003D1BF8u);
+        s_ctor2329_obj.store(obj, std::memory_order_relaxed);
+        s_ctor2329_ret.store(ret, std::memory_order_relaxed);
+        SET_GPR_U32(ctx, 4, obj + 0x40u);
+        SET_GPR_U32(ctx, 31, 0x002329D0u);
+        ctx->pc = 0x002665F0u;
+        for (uint32_t dispatchCount = 0u; dispatchCount < 4096u; ++dispatchCount) {
+            const uint32_t entryPc = ctx->pc;
+            if (entryPc >= 0x002665F0u && entryPc < 0x002668E0u) {
+                sub_002665F0_0x2665f0(rdram, ctx, runtime);
+            } else {
+                auto targetFn = runtime->lookupFunction(entryPc);
+                targetFn(rdram, ctx, runtime);
+            }
+            if (ctx->pc == 0x002329D0u) {
+                break;
+            }
+        }
+        if (ctx->pc != 0x002329D0u) {
+            return;
+        }
+
+        const uint8_t flags = static_cast<uint8_t>(READ8(obj + 0x28u) & 0xFEu);
+        WRITE8(obj + 0x28u, flags);
+        WRITE32(obj + 0x9918u, 0u);
+        SET_GPR_U32(ctx, 2, obj);
+        ctx->pc = ret;
+    });
+
     runtime.registerFunction(0x311DF0, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
         SET_GPR_S32(ctx, 2, 0);
         ctx->pc = GPR_U32(ctx, 31);
@@ -1570,13 +2673,71 @@ int main(int argc, char* argv[])
                       << " ra=0x" << GPR_U32(ctx, 31)
                       << std::dec << std::endl;
         }
-        const uint32_t entryPc = ctx->pc != 0x239C40u ? ctx->pc : 0x239C40u;
-        ctx->pc = entryPc;
-        sub_00239C40_0x239c40(rdram, ctx, runtime);
+        uint32_t entryPc = ctx->pc != 0x239C40u ? ctx->pc : 0x239C40u;
+        for (uint32_t step = 0; step < 4u; ++step) {
+            ctx->pc = entryPc;
+            sub_00239C40_0x239c40(rdram, ctx, runtime);
+            if (ctx->pc == 0x002E9210u) {
+                if (e < 4u) {
+                    std::cerr << "[sub_239C40:resume] callback walker returned pc=0x2e9210; continuing at 0x239d2c"
+                              << std::endl;
+                }
+                entryPc = 0x00239D2Cu;
+                continue;
+            }
+            if (ctx->pc >= 0x003CC548u && ctx->pc < 0x003CC650u) {
+                if (e < 4u) {
+                    std::cerr << "[sub_239C40:resume] callback table pc=0x" << std::hex
+                              << ctx->pc << "; continuing at 0x239d2c"
+                              << std::dec << std::endl;
+                }
+                entryPc = 0x00239D2Cu;
+                continue;
+            }
+            break;
+        }
         const auto x = s_exit.fetch_add(1, std::memory_order_relaxed);
         if (x < 4u || (x % 1000u) == 0u) {
             std::cerr << "[sub_239C40:exit ] n=" << x
                       << " pc=0x" << std::hex << ctx->pc
+                      << std::dec << std::endl;
+        }
+    });
+    runtime.registerFunction(0x23A0CCu, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint64_t> s_enter{0}, s_exit{0};
+        const auto e = s_enter.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t modBase = Ps2FastRead32(rdram, 0x382B80u);
+        const uint32_t vt = (modBase >= 0x00100000u && modBase + 0x280u < 0x02000000u)
+            ? Ps2FastRead32(rdram, modBase + 0x27Cu)
+            : 0u;
+        if (modBase == 0x44F000u && vt == 0x44F300u) {
+            const uint32_t current9c = Ps2FastRead32(rdram, vt + 0x9Cu);
+            if (current9c == 0x00FFF400u || current9c == 0u) {
+                Ps2FastWrite32(rdram, vt + 0x9Cu, 0x00FFF510u);
+            }
+        }
+        const uint32_t vt10 = (vt >= 0x00100000u && vt + 0xA0u < 0x02000000u) ? Ps2FastRead32(rdram, vt + 0x10u) : 0u;
+        const uint32_t vt30 = (vt >= 0x00100000u && vt + 0xA0u < 0x02000000u) ? Ps2FastRead32(rdram, vt + 0x30u) : 0u;
+        const uint32_t vt4c = (vt >= 0x00100000u && vt + 0xA0u < 0x02000000u) ? Ps2FastRead32(rdram, vt + 0x4Cu) : 0u;
+        const uint32_t vt9c = (vt >= 0x00100000u && vt + 0xA0u < 0x02000000u) ? Ps2FastRead32(rdram, vt + 0x9Cu) : 0u;
+        if (e < 12u || (e % 600u) == 0u) {
+            std::cerr << "[sub_239C40:23A0CC] n=" << e
+                      << " ra=0x" << std::hex << GPR_U32(ctx, 31)
+                      << " modBase=0x" << modBase
+                      << " vt=0x" << vt
+                      << " vt10=0x" << vt10
+                      << " vt30=0x" << vt30
+                      << " vt4c=0x" << vt4c
+                      << " vt9c=0x" << vt9c
+                      << std::dec << std::endl;
+        }
+        ctx->pc = 0x23A0CCu;
+        sub_00239C40_0x239c40(rdram, ctx, runtime);
+        const auto x = s_exit.fetch_add(1, std::memory_order_relaxed);
+        if (x < 12u || (x % 600u) == 0u) {
+            std::cerr << "[sub_239C40:23A0CC:exit] n=" << x
+                      << " pc=0x" << std::hex << ctx->pc
+                      << " v0=0x" << GPR_U32(ctx, 2)
                       << std::dec << std::endl;
         }
     });
@@ -1725,8 +2886,8 @@ int main(int argc, char* argv[])
         const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
         if (n < 3u || (n % 600u) == 0u) {
             const uint32_t dc8 = *(uint32_t*)(rdram + 0x443DC8u);
-            const uint32_t desc = *(uint32_t*)(rdram + 0x450000u);
-            const uint32_t tag0 = *(uint32_t*)(rdram + 0x450010u);
+            const uint32_t desc = *(uint32_t*)(rdram + 0x01E01000u);
+            const uint32_t tag0 = *(uint32_t*)(rdram + 0x01E01010u);
             printf("[sub_2596A0] n=%u dc8=0x%x desc=0x%x tag0=0x%x\n",
                    n, dc8, desc, tag0);
             fflush(stdout);
@@ -1751,9 +2912,33 @@ int main(int argc, char* argv[])
     // and calls sub_002FDCE8_0x2fdce8 DIRECTLY (not through the
     // dispatcher) — so this override does not break the setGameState
     // path, which still runs the real function body.
-    runtime.registerFunction(0x2FDCE8, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        SET_GPR_S32(ctx, 2, 1);
-        ctx->pc = GPR_U32(ctx, 31);
+    extern void sub_002FDCE8_0x2fdce8(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x2FDCE8, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t a0 = GPR_U32(ctx, 4);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        const std::string path = guest_cstr(rdram, a0, 96);
+        if (n < 16u) {
+            printf("[2FDCE8] n=%u real loader a0=0x%08X '%s' ra=0x%08X\n",
+                   n, a0, path.c_str(), savedRa);
+            fflush(stdout);
+        }
+
+        ctx->pc = 0x2FDCE8u;
+        sub_002FDCE8_0x2fdce8(rdram, ctx, runtime);
+
+        if (n < 16u) {
+            printf("[2FDCE8] n=%u ret=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            fflush(stdout);
+        }
+        if (GPR_U32(ctx, 2) != 0u && path.find("IOPRP") != std::string::npos) {
+            s_ioprp_handshake_done.store(1u, std::memory_order_release);
+        }
+        if (GPR_U32(ctx, 2) == 0u) {
+            SET_GPR_S32(ctx, 2, 1);
+            ctx->pc = savedRa;
+        }
     });
 
     // --- 0x2F7150  SIF/IOP wait-loop bypass ---
@@ -1818,14 +3003,16 @@ int main(int argc, char* argv[])
         // so this path is no longer needed for module-6 boot completion.
         // Kept here as a fallback in case sif_dmaSend is called from a
         // non-render path during boot (e.g., module-init IOP messages).
-        if (n == 2u && !s_iop_init_done.load(std::memory_order_acquire)) {
+        if (n == 2u &&
+            s_real_asset_path_mode.load(std::memory_order_acquire) == 0u &&
+            !s_iop_init_done.load(std::memory_order_acquire)) {
             s_iop_init_done.store(1u, std::memory_order_release);
             printf("[sif_dmaSend] call#%u: IOP init done (fallback path)\n", n);
             fflush(stdout);
         }
     });
 
-    // --- 0x2F84F0  IOP-init bypass (sub_002F84F0) ---
+    // --- 0x2F84F0  IOP/SIF init ---
     //
     // Called from boot_subinit (sub_00239C40 at label_239d2c) with $a0=0.
     // Real function: initialises SIF, calls func_2F5FB0 (IOP bind, returns 0
@@ -1836,10 +3023,37 @@ int main(int argc, char* argv[])
     // Phase 4 can write mem[0x447B80]=1, causing an infinite spin.  The caller
     // doesn't branch on the return value of func_2F84F0 (label_239d34 calls
     // func_311DF0 unconditionally), so a stub that returns 1 immediately is safe.
-    runtime.registerFunction(0x2F84F0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        SET_GPR_U32(ctx, 2, 1u);   // $v0 = 1 (success/ready)
-        ctx->pc = GPR_U32(ctx, 31); // jr $ra
-    });
+    {
+        extern void sub_002F84F0_0x2f84f0(uint8_t*, R5900Context*, PS2Runtime*);
+        runtime.registerFunction(0x2F84F0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 8u) {
+                printf("[IopSifInit 2F84F0:pre] n=%u a0=0x%08X ra=0x%08X pool0=%u pool4=0x%08X pool8=%u ready=0x%08X\n",
+                       n, GPR_U32(ctx, 4), GPR_U32(ctx, 31),
+                       Ps2FastRead32(rdram, 0x449400u), Ps2FastRead32(rdram, 0x449404u),
+                       Ps2FastRead32(rdram, 0x449408u), Ps2FastRead32(rdram, 0x447B80u));
+                fflush(stdout);
+            }
+            if (s_real_asset_path_mode.load(std::memory_order_acquire) == 0u) {
+                Ps2FastWrite32(rdram, 0x447B80u, 1u);
+            } else if (n < 8u) {
+                printf("[IopSifInit 2F84F0] real-asset-path: not forcing 0x447B80 ready\n");
+                fflush(stdout);
+            }
+            ctx->pc = 0x2F84F0u;
+            sub_002F84F0_0x2f84f0(rdram, ctx, runtime);
+            if (n < 8u) {
+                printf("[IopSifInit 2F84F0:post] n=%u ret=0x%08X pc=0x%08X pool0=%u pool4=0x%08X pool8=%u pool14=0x%08X pool18=%u pool20=%u ready=0x%08X\n",
+                       n, GPR_U32(ctx, 2), ctx->pc,
+                       Ps2FastRead32(rdram, 0x449400u), Ps2FastRead32(rdram, 0x449404u),
+                       Ps2FastRead32(rdram, 0x449408u), Ps2FastRead32(rdram, 0x449414u),
+                       Ps2FastRead32(rdram, 0x449418u), Ps2FastRead32(rdram, 0x449420u),
+                       Ps2FastRead32(rdram, 0x447B80u));
+                fflush(stdout);
+            }
+        });
+    }
 
     // --- 0x2F7370  IOP-connection init bypass (func_2F7370) ---
     //
@@ -1861,6 +3075,90 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
     });
 
+    runtime.registerFunction(0x311C80u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u) {
+            printf("[IOPResetReady 0x311C80] n=%u a0=0x%08X ra=0x%08X -> ready\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 2, 1u);
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    extern void sub_002F8B60_0x2f8b60(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_002F8D30_0x2f8d30(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x314020u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u) {
+            printf("[IOPGfxInit 0x314020:pre] n=%u a0=0x%08X ra=0x%08X capA=0x%08X capB=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 31),
+                   Ps2FastRead32(rdram, 0x43AA04u), Ps2FastRead32(rdram, 0x43FA08u));
+            fflush(stdout);
+        }
+        const uint32_t returnPc = GPR_U32(ctx, 31);
+
+        // Partial translation of sub_00314020 from the ELF:
+        //   bind GFX RPC client 0x44C480 to server 0x80000400,
+        //   call RPC id 0xFE with recv buffer 0x44DA40,
+        //   require recv[4] >= 0x20A and recv[8] >= 0x20E,
+        //   return recv[0].
+        SET_GPR_U32(ctx, 4, 0x0044C480u);
+        SET_GPR_U32(ctx, 5, 0x80000400u);
+        SET_GPR_U32(ctx, 6, 0u);
+        SET_GPR_U32(ctx, 31, 0x00FFF310u);
+        ctx->pc = 0x2F8B60u;
+        sub_002F8B60_0x2f8b60(rdram, ctx, runtime);
+        const uint32_t bindRet = GPR_U32(ctx, 2);
+        if (bindRet & 0x80000000u) {
+            SET_GPR_U32(ctx, 2, bindRet);
+            ctx->pc = returnPc;
+            return;
+        }
+
+        SET_GPR_U32(ctx, 4, 0x0044C480u);
+        SET_GPR_U32(ctx, 5, 0xFEu);
+        SET_GPR_U32(ctx, 6, 0u);
+        SET_GPR_U32(ctx, 7, 0x0044C500u);
+        SET_GPR_U32(ctx, 8, 0x30u);
+        SET_GPR_U32(ctx, 9, 0x0044DA40u);
+        SET_GPR_U32(ctx, 10, 0x0Cu);
+        SET_GPR_U32(ctx, 11, 0u);
+        WRITE32(GPR_U32(ctx, 29), 0u);
+        SET_GPR_U32(ctx, 31, 0x00FFF314u);
+        ctx->pc = 0x2F8D30u;
+        runtime->lookupFunction(0x2F8D30u)(rdram, ctx, runtime);
+        const uint32_t callRet = GPR_U32(ctx, 2);
+        uint32_t ret = callRet;
+        if ((callRet & 0x80000000u) == 0u) {
+            const uint32_t versionA = Ps2FastRead32(rdram, 0x44DA44u);
+            const uint32_t versionB = Ps2FastRead32(rdram, 0x44DA48u);
+            if (versionA < 0x20Au) {
+                ret = 0xFFFFFF88u;
+            } else if (versionB < 0x20Eu) {
+                ret = 0xFFFFFF87u;
+            } else {
+                ret = Ps2FastRead32(rdram, 0x44DA40u);
+            }
+        }
+        if (ret != 0u && ret < 0x80000000u) {
+            s_iop_gfx_rpc_ready.store(1u, std::memory_order_release);
+        }
+        if (n < 8u) {
+            printf("[IOPGfxInit 0x314020:post] n=%u bindRet=0x%08X callRet=0x%08X ret=0x%08X "
+                   "recv0=0x%08X recv4=0x%08X recv8=0x%08X client24=0x%08X capA=0x%08X capB=0x%08X\n",
+                   n, bindRet, callRet, ret,
+                   Ps2FastRead32(rdram, 0x44DA40u), Ps2FastRead32(rdram, 0x44DA44u),
+                   Ps2FastRead32(rdram, 0x44DA48u), Ps2FastRead32(rdram, 0x44C4A4u),
+                   Ps2FastRead32(rdram, 0x43AA04u), Ps2FastRead32(rdram, 0x43FA08u));
+            fflush(stdout);
+        }
+        SET_GPR_U32(ctx, 2, ret);
+        ctx->pc = returnPc;
+    });
+
     // --- 0x312DA0  IOP SIF DMA completion spin-bypass (sub_00312DA0) ---
     //
     // Calls func_2F8B60 (SIF DMA send) then polls struct[+0x24] in a tight
@@ -1872,6 +3170,20 @@ int main(int argc, char* argv[])
     runtime.registerFunction(0x312DA0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
         SET_GPR_U32(ctx, 2, 1u);   // $v0 = 1 (done)
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    // --- 0x1048E0  interior entry in sub_00104850 ---
+    //
+    // ELF code reaches this via function pointer from sub_2E8860.  The
+    // generated body includes the instructions, but register_functions.cpp
+    // only registers other interior labels in sub_00104850.  Exact code:
+    //   sqc2 vf0, 0(a0); jr ra; move v0, a0
+    runtime.registerFunction(0x1048E0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        (void)rdram;
+        (void)runtime;
+        WRITE128(GPR_U32(ctx, 4), _mm_castps_si128(ctx->vu0_vf[0]));
+        SET_GPR_VEC(ctx, 2, _mm_adds_epu8(GPR_VEC(ctx, 4), GPR_VEC(ctx, 0)));
+        ctx->pc = GPR_U32(ctx, 31);
     });
 
     // --- 0x2E8D90  Module-ready wait bypass (sub_002E8D90) ---
@@ -1891,9 +3203,290 @@ int main(int argc, char* argv[])
     //   setup (func_141300 etc.), which is the correct no-IOP behaviour.  The game
     //   continues past these optional dependency registrations and func_13FDA0 runs
     //   to completion.
-    runtime.registerFunction(0x2E8D90u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+    extern void sub_002E8D90_0x2e8d90(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x2E8D90u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 32u || (n % 600u) == 0u) {
+            const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+            const uint32_t stateTable = (modTable >= 0x100000u && modTable < 0x2000000u)
+                ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+                : 0u;
+            printf("[ModuleReady 0x2E8D90] n=%u module=0x%08X ra=0x%08X modTable=0x%08X stateTable=0x%08X -> not-ready\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 31), modTable, stateTable);
+            fflush(stdout);
+        }
         SET_GPR_U32(ctx, 2, 0u);    // $v0 = 0 (module not ready — no IOP)
         ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    });
+
+    runtime.registerFunction(0x2E8D90u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t module = GPR_U32(ctx, 4);
+        const uint32_t ra = GPR_U32(ctx, 31);
+        if (n < 32u || (n % 600u) == 0u) {
+            const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+            const uint32_t stateTable = (modTable >= 0x100000u && modTable < 0x2000000u)
+                ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+                : 0u;
+            printf("[ModuleReadyReal 0x2E8D90:pre] n=%u module=0x%08X ra=0x%08X modTable=0x%08X stateTable=0x%08X mode=%u\n",
+                   n, module, ra, modTable, stateTable,
+                   s_real_asset_path_mode.load(std::memory_order_acquire));
+            fflush(stdout);
+        }
+        if (s_real_asset_path_mode.load(std::memory_order_acquire) != 0u) {
+            ctx->pc = 0x2E8D90u;
+            sub_002E8D90_0x2e8d90(rdram, ctx, runtime);
+            uint32_t ret = GPR_U32(ctx, 2);
+            if (ret != 0u && (ret < 0x100000u || ret >= 0x02000000u)) {
+                printf("[ModuleReadyReal 0x2E8D90:clamp] n=%u module=0x%08X nativeRet=0x%08X pc=0x%08X -> 0\n",
+                       n, module, ret, ctx->pc);
+                fflush(stdout);
+                ret = 0u;
+                SET_GPR_U32(ctx, 2, 0u);
+            }
+            if (n < 32u || ret != 0u || ctx->pc != ra || (n % 600u) == 0u) {
+                printf("[ModuleReadyReal 0x2E8D90:post] n=%u module=0x%08X ret=0x%08X pc=0x%08X ra=0x%08X\n",
+                       n, module, ret, ctx->pc, ra);
+                fflush(stdout);
+            }
+            if (ctx->pc == 0x2E8D90u) {
+                ctx->pc = ra;
+            }
+            return;
+        }
+        SET_GPR_U32(ctx, 2, 0u);
+        ctx->pc = ra;
+    });
+
+    {
+        extern void sub_001CF2C0_0x1cf2c0(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_001D0580_0x1d0580(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_001B2870_0x1b2870(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002EAEC0_0x2eaec0(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002EB060_0x2eb060(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002EB1C0_0x2eb1c0(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002EC598_0x2ec598(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002ED668_0x2ed668(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002F5538_0x2f5538(uint8_t*, R5900Context*, PS2Runtime*);
+
+        auto register_real_hw_init = [&](uint32_t pc, const char* name, void (*fn)(uint8_t*, R5900Context*, PS2Runtime*)) {
+            switch (pc) {
+            case 0x2EAEC0u:
+                runtime.registerFunction(pc, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                    static std::atomic<uint32_t> s_n{0};
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                    if (n < 2u) {
+                        printf("[RealHwInitBypass 0x2EAEC0] generated body is TODO; returning 0\n");
+                        fflush(stdout);
+                    }
+                    (void)rdram; (void)runtime;
+                    SET_GPR_U32(ctx, 2, 0u);
+                    ctx->pc = GPR_U32(ctx, 31);
+                });
+                break;
+            case 0x2EB060u:
+                runtime.registerFunction(pc, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                    static std::atomic<uint32_t> s_n{0};
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                    if (n < 2u) {
+                        printf("[RealHwInitBypass 0x2EB060] generated body is TODO; returning 0\n");
+                        fflush(stdout);
+                    }
+                    (void)rdram; (void)runtime;
+                    SET_GPR_U32(ctx, 2, 0u);
+                    ctx->pc = GPR_U32(ctx, 31);
+                });
+                break;
+            case 0x2EB1C0u:
+                runtime.registerFunction(pc, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                    static std::atomic<uint32_t> s_n{0};
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                    if (n < 2u) {
+                        printf("[RealHwInitBypass 0x2EB1C0] generated body is TODO; returning 0\n");
+                        fflush(stdout);
+                    }
+                    (void)rdram; (void)runtime;
+                    SET_GPR_U32(ctx, 2, 0u);
+                    ctx->pc = GPR_U32(ctx, 31);
+                });
+                break;
+            case 0x2EC598u:
+                runtime.registerFunction(pc, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                    static std::atomic<uint32_t> s_n{0};
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                    if (n < 2u) {
+                        printf("[RealHwInitBypass 0x2EC598] generated body is TODO; returning 0\n");
+                        fflush(stdout);
+                    }
+                    (void)rdram; (void)runtime;
+                    SET_GPR_U32(ctx, 2, 0u);
+                    ctx->pc = GPR_U32(ctx, 31);
+                });
+                break;
+            case 0x2ED668u:
+                runtime.registerFunction(pc, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                    static std::atomic<uint32_t> s_n{0};
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                    if (n < 2u) {
+                        printf("[RealHwInitBypass 0x2ED668] generated body is TODO; returning 0\n");
+                        fflush(stdout);
+                    }
+                    (void)rdram; (void)runtime;
+                    SET_GPR_U32(ctx, 2, 0u);
+                    ctx->pc = GPR_U32(ctx, 31);
+                });
+                break;
+            case 0x2F5538u:
+                runtime.registerFunction(pc, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+                    static std::atomic<uint32_t> s_n{0};
+                    const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+                    if (n < 2u) {
+                        printf("[RealHwInitBypass 0x2F5538] generated body is TODO; returning 0\n");
+                        fflush(stdout);
+                    }
+                    (void)rdram; (void)runtime;
+                    SET_GPR_U32(ctx, 2, 0u);
+                    ctx->pc = GPR_U32(ctx, 31);
+                });
+                break;
+            default:
+                (void)name;
+                (void)fn;
+                break;
+            }
+        };
+
+        register_real_hw_init(0x2EAEC0u, "sub_002EAEC0", sub_002EAEC0_0x2eaec0);
+        register_real_hw_init(0x2EB060u, "sub_002EB060", sub_002EB060_0x2eb060);
+        register_real_hw_init(0x2EB1C0u, "sub_002EB1C0", sub_002EB1C0_0x2eb1c0);
+        register_real_hw_init(0x2EC598u, "sub_002EC598", sub_002EC598_0x2ec598);
+        register_real_hw_init(0x2ED668u, "sub_002ED668", sub_002ED668_0x2ed668);
+        register_real_hw_init(0x2F5538u, "sub_002F5538", sub_002F5538_0x2f5538);
+
+        runtime.registerFunction(0x1CF2C0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            printf("[AssetCtorTrace 0x1CF2C0:pre] n=%u a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 31));
+            fflush(stdout);
+            ctx->pc = 0x1CF2C0u;
+            sub_001CF2C0_0x1cf2c0(rdram, ctx, runtime);
+            printf("[AssetCtorTrace 0x1CF2C0:post] n=%u ret=0x%08X pc=0x%08X obj2B4=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (GPR_U32(ctx, 20) >= 0x100000u && GPR_U32(ctx, 20) + 0x2B4u < 0x02000000u)
+                       ? Ps2FastRead32(rdram, GPR_U32(ctx, 20) + 0x2B4u) : 0u);
+            fflush(stdout);
+        });
+
+        runtime.registerFunction(0x1D0580u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            printf("[AssetCtorTrace 0x1D0580:pre] n=%u a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X ra=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 7), GPR_U32(ctx, 31));
+            fflush(stdout);
+            ctx->pc = 0x1D0580u;
+            sub_001D0580_0x1d0580(rdram, ctx, runtime);
+            printf("[AssetCtorTrace 0x1D0580:post] n=%u ret=0x%08X pc=0x%08X obj2B4=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (GPR_U32(ctx, 20) >= 0x100000u && GPR_U32(ctx, 20) + 0x2B4u < 0x02000000u)
+                       ? Ps2FastRead32(rdram, GPR_U32(ctx, 20) + 0x2B4u) : 0u);
+            fflush(stdout);
+        });
+
+        runtime.registerFunction(0x1B2870u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t obj = GPR_U32(ctx, 4);
+            printf("[AssetObjTrace 0x1B2870:pre] n=%u obj=0x%08X a1=0x%08X ra=0x%08X\n",
+                   n, obj, GPR_U32(ctx, 5), GPR_U32(ctx, 31));
+            fflush(stdout);
+            ctx->pc = 0x1B2870u;
+            sub_001B2870_0x1b2870(rdram, ctx, runtime);
+            printf("[AssetObjTrace 0x1B2870:post] n=%u ret=0x%08X pc=0x%08X obj8=0x%08X obj524=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (obj >= 0x100000u && obj + 0x528u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 8u) : 0u,
+                   (obj >= 0x100000u && obj + 0x528u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x524u) : 0u);
+            fflush(stdout);
+        });
+
+        runtime.registerFunction(0x1B2A9Cu, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            printf("[AssetInteriorTrace 0x1B2A9C] n=%u a0=0x%08X ra=0x%08X -> 0x270550\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 31));
+            fflush(stdout);
+            ctx->pc = 0x270550u;
+            interpretMipsKseg0(rdram, ctx, runtime, 0x270550u);
+        });
+
+        runtime.registerFunction(0x270550u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t obj = GPR_U32(ctx, 4);
+            printf("[AssetLoaderTrace 0x270550:pre] n=%u obj=0x%08X ra=0x%08X\n",
+                   n, obj, GPR_U32(ctx, 31));
+            fflush(stdout);
+            ctx->pc = 0x270550u;
+            interpretMipsKseg0(rdram, ctx, runtime, 0x270550u);
+            printf("[AssetLoaderTrace 0x270550:post] n=%u pc=0x%08X ret=0x%08X obj34=0x%08X obj390=0x%02X\n",
+                   n, ctx->pc, GPR_U32(ctx, 2),
+                   (obj >= 0x100000u && obj + 0x394u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x34u) : 0u,
+                   (obj >= 0x100000u && obj + 0x394u < 0x02000000u) ? Ps2FastRead8(rdram, obj + 0x390u) : 0u);
+            fflush(stdout);
+        });
+    }
+
+    extern void sub_002E8CA0_0x2e8ca0(uint8_t*, R5900Context*, PS2Runtime*);
+    auto register_2e8ca0_entry = [&](uint32_t entry) {
+        runtime.registerFunction(entry, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            if (n < 16u || (n % 600u) == 0u) {
+                printf("[Entry2E8CA0] n=%u entry=0x%08X ra=0x%08X sp=0x%08X\n",
+                       n, ctx->pc, GPR_U32(ctx, 31), GPR_U32(ctx, 29));
+                fflush(stdout);
+            }
+            sub_002E8CA0_0x2e8ca0(rdram, ctx, runtime);
+        });
+    };
+    register_2e8ca0_entry(0x2E8CC0u);
+    register_2e8ca0_entry(0x2E8D10u);
+    register_2e8ca0_entry(0x2E8D54u);
+    register_2e8ca0_entry(0x2E8D70u);
+
+    extern void sub_00305700_0x305700(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x305700u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t size = GPR_U32(ctx, 4);
+        const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+        if (n < 64u || size >= 0x1000u || (n % 600u) == 0u) {
+            const uint32_t freeA = Ps2FastRead32(rdram, 0x385468u);
+            const uint32_t freeB = Ps2FastRead32(rdram, 0x385470u);
+            const uint32_t topA = Ps2FastRead32(rdram, 0x385880u);
+            const uint32_t usedA = Ps2FastRead32(rdram, 0x385898u);
+            const uint32_t listSmall = Ps2FastRead32(rdram, 0x385468u + 0x10u + 0x0Cu);
+            const uint32_t listLarge = Ps2FastRead32(rdram, 0x385468u + 0x7Eu * 8u + 0x0Cu);
+            printf("[Alloc305700:pre] n=%u size=0x%X ra=0x%08X modTable=0x%08X "
+                   "freeA=0x%08X freeB=0x%08X topA=0x%08X usedA=0x%08X "
+                   "listSmall=0x%08X listLarge=0x%08X\n",
+                   n, size, GPR_U32(ctx, 31), modTable,
+                   freeA, freeB, topA, usedA, listSmall, listLarge);
+            fflush(stdout);
+        }
+        ctx->pc = 0x305700u;
+        sub_00305700_0x305700(rdram, ctx, runtime);
+        if (n < 64u || size >= 0x1000u || GPR_U32(ctx, 2) == 0u || (n % 600u) == 0u) {
+            printf("[Alloc305700:post] n=%u size=0x%X ret=0x%08X pc=0x%08X "
+                   "ra=0x%08X hdr4=0x%08X hdr8=0x%08X hdrC=0x%08X\n",
+                   n, size, GPR_U32(ctx, 2), ctx->pc, GPR_U32(ctx, 31),
+                   GPR_U32(ctx, 2) ? Ps2FastRead32(rdram, GPR_U32(ctx, 2) - 0x10u + 4u) : 0u,
+                   GPR_U32(ctx, 2) ? Ps2FastRead32(rdram, GPR_U32(ctx, 2) - 0x10u + 8u) : 0u,
+                   GPR_U32(ctx, 2) ? Ps2FastRead32(rdram, GPR_U32(ctx, 2) - 0x10u + 0x0Cu) : 0u);
+            fflush(stdout);
+        }
     });
 
     // --- 0x315800  IOP SIF DMA multi-send spin-bypass (sub_00315800) ---
@@ -1902,9 +3495,45 @@ int main(int argc, char* argv[])
     // struct+0x24 for IOP completion on each one.  Without IOP emulation the
     // completion flag stays 0 and the outer retry loop spins forever at
     // label_315828.  Same pattern as sub_00312DA0.  Returns 1 = success.
-    runtime.registerFunction(0x315800u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        SET_GPR_U32(ctx, 2, 1u);    // $v0 = 1 (success)
-        ctx->pc = GPR_U32(ctx, 31); // jr $ra
+    extern void sub_00315800_0x315800(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x315800u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t returnPc = GPR_U32(ctx, 31);
+        if (n < 8u) {
+            printf("[IopGfxRpcInit 0x315800:pre] n=%u ra=0x%08X c901=0x%08X c902=0x%08X c903=0x%08X c904=0x%08X c905=0x%08X\n",
+                   n, returnPc,
+                   Ps2FastRead32(rdram, 0x44DA80u), Ps2FastRead32(rdram, 0x44DAA8u),
+                   Ps2FastRead32(rdram, 0x44DAD0u), Ps2FastRead32(rdram, 0x44DAF8u),
+                   Ps2FastRead32(rdram, 0x44DB20u));
+            fflush(stdout);
+        }
+        ctx->pc = 0x315800u;
+        for (uint32_t dispatchCount = 0u; dispatchCount < 4096u; ++dispatchCount) {
+            const uint32_t entryPc = ctx->pc;
+            if (entryPc == 0x315800u) {
+                sub_00315800_0x315800(rdram, ctx, runtime);
+            } else if (runtime->hasFunction(entryPc)) {
+                auto targetFn = runtime->lookupFunction(entryPc);
+                targetFn(rdram, ctx, runtime);
+            } else {
+                break;
+            }
+            if (ctx->pc == returnPc) {
+                break;
+            }
+        }
+        if (n < 8u) {
+            printf("[IopGfxRpcInit 0x315800:post] n=%u ret=0x%08X pc=0x%08X c901_24=0x%08X c902_24=0x%08X c903_24=0x%08X c904_24=0x%08X c905_24=0x%08X status=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   Ps2FastRead32(rdram, 0x44DAA4u), Ps2FastRead32(rdram, 0x44DACCu),
+                   Ps2FastRead32(rdram, 0x44DAF4u), Ps2FastRead32(rdram, 0x44DB1Cu),
+                   Ps2FastRead32(rdram, 0x44DB44u), Ps2FastRead32(rdram, 0x44DB80u));
+            fflush(stdout);
+        }
+        if (ctx->pc == 0x315800u) {
+            ctx->pc = returnPc;
+        }
     });
 
     // --- 0x5c  FlushCache BIOS stub bypass ---
@@ -1972,10 +3601,47 @@ int main(int argc, char* argv[])
     // This is safe: on real PS2, func_1000B8 / func_2FEA30 are the
     // ExitDeleteThread tail-chain; they're never reached during normal
     // game execution.
-    runtime.registerFunction(0x1000B8u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        SET_GPR_S32(ctx, 2, 0);         // $v0 = 0
-        ctx->pc = GPR_U32(ctx, 31);     // jr $ra
+    {
+    extern void sub_002E8B00_0x2e8b00(uint8_t*, R5900Context*, PS2Runtime*);
+    runtime.registerFunction(0x1000B8u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        const uint32_t savedA0 = GPR_U32(ctx, 4);
+        const uint32_t savedA1 = GPR_U32(ctx, 5);
+        const uint32_t savedSp = GPR_U32(ctx, 29);
+        if (savedRa == 0x302E08u) {
+            // 0x302DF0 calls the public entry at 0x1000B8, whose first
+            // instruction is the ExitThread/event-pump trampoline.  The
+            // later body at 0x1000D0 is not reachable from this entry; do
+            // not synthesize its side effect here from a stale caller $a1.
+            const uint32_t stateNow = Ps2FastRead32(rdram, 0x384670u);
+            const uint32_t modT0Now = Ps2FastRead32(rdram, 0x385160u);
+            if (n < 32u || (savedA1 != 0u && (n % 120u) == 0u) ||
+                (modT0Now == 0x16u && (n % 120u) == 0u)) {
+                printf("[1000B8:moduleLoopExit] n=%u a0=0x%08X staleA1=0x%08X ra=0x%08X state=0x%08X modT0=0x%08X\n",
+                       n, savedA0, savedA1, savedRa, stateNow, modT0Now);
+                fflush(stdout);
+            }
+            SET_GPR_U32(ctx, 4, savedA0);
+            SET_GPR_U32(ctx, 5, savedA1);
+            SET_GPR_U32(ctx, 29, savedSp);
+            SET_GPR_U32(ctx, 31, savedRa);
+            SET_GPR_U32(ctx, 2, savedA0);
+            ctx->pc = savedRa;
+            return;
+        }
+        SET_GPR_U32(ctx, 4, 0u);        // Delay slot of `j 0x2FEA30`: move $a0, $zero
+        const uint32_t sideRet = run_2fe0c0_event_side_effects(rdram, ctx, runtime);
+        if (n < 16u) {
+            printf("[1000B8] n=%u event-pump a0=0 ra=0x%08X sideRet=0x%08X flag44F588=0x%08X\n",
+                   n, savedRa, sideRet, Ps2FastRead32(rdram, 0x44F588u));
+            fflush(stdout);
+        }
+        SET_GPR_S32(ctx, 2, 0);         // preserve previous non-blocking return contract
+        ctx->pc = savedRa;              // jr $ra, skipping only the final ExitThread tail-call
     });
+    }
 
     // --- 0x00FFF500  gsState-callback sentinel ---
     // Wired into gsState+0xDC by bootstrap. sub_2596A0 jalrs through
@@ -2136,15 +3802,37 @@ int main(int argc, char* argv[])
     // state[6]=0 calls func_308C08 + func_308BA8 → func_2FEA30 per iteration.
     // When the bootstrap later writes state[6]=0xFFF200, the next iteration
     // sees it and calls our modUpdate6 sentinel instead.
-    runtime.registerFunction(0x2FEA30u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+    runtime.registerFunction(0x2FEA30u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
         static std::atomic<uint32_t> s_n{0};
         const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
-        if (n == 0u) {
-            printf("[2FEA30] IOP event-pump stub active (returns -1 to unblock module thread)\n");
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        const uint32_t savedA0 = GPR_U32(ctx, 4);
+        const uint32_t sideRet = run_2fe0c0_event_side_effects(rdram, ctx, runtime);
+        if (s_real_asset_path_mode.load(std::memory_order_acquire) != 0u &&
+            savedA0 == 6u &&
+            s_iop_gfx_rpc_ready.load(std::memory_order_acquire) != 0u &&
+            s_iop_gfx_completion_posted.exchange(1u, std::memory_order_acq_rel) == 0u) {
+            // The real IOP GFX service owns module-6 completion. Once its EE
+            // RPC handshake has passed, queue the module-6 state callback that
+            // installs the game's frame state; setGameState then marks slot 6
+            // done and sub_00308958 consumes that normally on the next pass.
+            Ps2FastWrite32(rdram, 0x44F588u, 0x16u);
+            const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+            const uint32_t stateTable = (modTable >= 0x00100000u && modTable + 0x1D8u < 0x02000000u)
+                ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+                : 0u;
+            if (stateTable >= 0x00100000u && stateTable + 0x1Cu < 0x02000000u) {
+                Ps2FastWrite32(rdram, stateTable + 0x18u, 0x002FDDF8u);
+            }
+        }
+        if (n < 16u) {
+            printf("[2FEA30] n=%u event-pump a0=0x%08X a1=0x%08X ra=0x%08X sideRet=0x%08X flag44F588=0x%08X -> -1\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), savedRa, sideRet,
+                   Ps2FastRead32(rdram, 0x44F588u));
             fflush(stdout);
         }
         SET_GPR_S32(ctx, 2, -1);       // $v0 = -1
-        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+        ctx->pc = savedRa;             // jr $ra, skipping only the final ExitThread tail-call
     });
 
     // --- 0x00FFF400  zero-return sentinel ---
@@ -2157,7 +3845,7 @@ int main(int argc, char* argv[])
         ctx->pc = GPR_U32(ctx, 31);
     });
 
-    // --- 0x00FFF500  one-return sentinel ---
+    // --- 0x00FFF510  one-return sentinel ---
     //
     // Companion to FFF400. Returns $v0=1 (non-zero / success).
     // Installed at rdram[modVTable + 0x9C] so that sub_237640's vtable[0x9C]
@@ -2166,7 +3854,7 @@ int main(int argc, char* argv[])
     //
     // Without this, vtable[0x9C] returned 0 (FFF400 was used) and the bnez
     // at label_237670 was never taken, so func_13FDA0 was silently skipped.
-    runtime.registerFunction(0x00FFF500u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+    runtime.registerFunction(0x00FFF510u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
         SET_GPR_S32(ctx, 2, 1);        // $v0 = 1 (non-zero / success)
         ctx->pc = GPR_U32(ctx, 31);    // jr $ra
     });
@@ -2216,6 +3904,42 @@ int main(int argc, char* argv[])
 
     // --- callback[34] @ 0x3CB140 — TYPE-B "prepender" (tail-jump j 0x2E91C0) ---
     //
+    // --- callback[12] @ 0x3CA6D0 - matrix + 0x24CF80 helper + 0x24D390 node ---
+    runtime.registerFunction(0x3CA6D0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        if (!rdram || !ctx) return;
+        static const float kMatrix[16] = {
+            0.f, 0.f, 0.f, 1.f,
+            1.f, 0.f, 0.f, 1.f,
+            0.f, 1.f, 0.f, 1.f,
+            0.f, 0.f, 1.f, 1.f,
+        };
+        std::memcpy(rdram + 0x4357D0u, kMatrix, sizeof(kMatrix));
+        (void)runtime;
+        const uint32_t data = 0x004357D0u;
+        prepend_boot_node(rdram, 0x4357C0u, 0x0024D390u, data);
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[12] 0x3CA6D0] matrix + prepend node=0x4357C0 fn=0x24D390 data=0x%08X\n", data);
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
+    // --- callback[30] @ 0x3CAFA0 - TYPE-B prepender with two 0x24A8E0 inits ---
+    runtime.registerFunction(0x3CAFA0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        if (!rdram || !ctx) return;
+        init_24a8e0_struct(rdram, 0x443650u);
+        init_24a8e0_struct(rdram, 0x443720u);
+        call_299130_helper(rdram, ctx, runtime, 0x00443800u, 0x00299190u, 0x004437F0u);
+        prepend_boot_node(rdram, 0x4437F0u, 0x00299190u, 0x00443800u);
+        static std::atomic<bool> s_logged{false};
+        if (!s_logged.exchange(true)) {
+            printf("[callback[30] 0x3CAFA0] 2x24A8E0 + func_299130 + prepend node=0x4437F0 fn=0x299190 data=0x443800\n");
+            fflush(stdout);
+        }
+        ctx->pc = GPR_U32(ctx, 31);
+    });
+
     // Same shape as cb[18]:
     //   $a0=0x443970, $a1=0x2A3180 (fn), $a2=0x443960 (node), WRITE32 zeros
     //
@@ -2346,9 +4070,11 @@ int main(int argc, char* argv[])
     // no registered entry point — walker can't dispatch it.  Skipping
     // (1) and (3) leaves us no worse than synthPrepend (which writes
     // nothing) and adds the one static data write.
-    runtime.registerFunction(0x3CAFF0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+    runtime.registerFunction(0x3CAFF0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
         if (!rdram || !ctx) return;
+        call_299130_helper(rdram, ctx, runtime, 0x00443890u, 0x0029E200u, 0x00443878u);
         *(uint32_t*)(rdram + 0x443898u) = 0x003D3910u;
+        prepend_boot_node(rdram, 0x443878u, 0x0029E200u, 0x00443890u);
         static std::atomic<bool> s_logged{false};
         if (!s_logged.exchange(true)) {
             printf("[callback[31] 0x3CAFF0] rdram[0x443898] = 0x003D3910 (PARTIAL — helper+prepend skipped)\n");
@@ -2568,14 +4294,42 @@ int main(int argc, char* argv[])
     // risks hitting uninitialised state and hanging.  Bypassed here; func_25A3E0
     // (below) is also bypassed for the same reason.  func_13FDA0 does not depend
     // on data set up by this pair and runs correctly without them.
-    runtime.registerFunction(0x259E00u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        static std::atomic<bool> s_logged{false};
-        if (!s_logged.exchange(true)) {
-            printf("[BYPASS 259E00] GS allocator bypassed (returns 0)\n");
+    extern void sub_00259E00_0x259e00(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_0025A3E0_0x25a3e0(uint8_t*, R5900Context*, PS2Runtime*);
+
+    runtime.registerFunction(0x259E00u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t obj = GPR_U32(ctx, 4);
+        const uint32_t returnPc = GPR_U32(ctx, 31);
+        if (n < 16u) {
+            printf("[DIAG sub_259E00:pre] n=%u obj=0x%08X ra=0x%08X\n", n, obj, returnPc);
             fflush(stdout);
         }
-        SET_GPR_S32(ctx, 2, 0);        // $v0 = 0 (no allocation handle)
-        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+        ctx->pc = 0x259E00u;
+        for (uint32_t dispatchCount = 0u; dispatchCount < 16384u; ++dispatchCount) {
+            const uint32_t entryPc = ctx->pc;
+            if (entryPc >= 0x00259E00u && entryPc < 0x0025A3E0u) {
+                sub_00259E00_0x259e00(rdram, ctx, runtime);
+            } else if (runtime->hasFunction(entryPc)) {
+                auto targetFn = runtime->lookupFunction(entryPc);
+                targetFn(rdram, ctx, runtime);
+            } else {
+                printf("[DIAG sub_259E00:missing] n=%u pc=0x%08X return=0x%08X\n", n, entryPc, returnPc);
+                break;
+            }
+            if (ctx->pc == returnPc) {
+                break;
+            }
+        }
+        if (n < 16u) {
+            printf("[DIAG sub_259E00:post] n=%u rv=0x%08X pc=0x%08X obj[2C]=0x%08X obj[38]=0x%08X obj[88]=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (obj >= 0x00100000u && obj + 0x90u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x2Cu) : 0u,
+                   (obj >= 0x00100000u && obj + 0x90u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x38u) : 0u,
+                   (obj >= 0x00100000u && obj + 0x90u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x88u) : 0u);
+            fflush(stdout);
+        }
     });
 
     // --- 0x25A3E0  GS state-block setup bypass (sub_0025A3E0) ---
@@ -2585,14 +4339,41 @@ int main(int argc, char* argv[])
     // func_259E00) the writes would target the very start of RDRAM which is
     // harmless but pointless.  Bypassed for clarity; func_13FDA0 is called next
     // regardless and does not depend on the state block.
-    runtime.registerFunction(0x25A3E0u, +[](uint8_t* /*rdram*/, R5900Context* ctx, PS2Runtime* /*runtime*/) {
-        static std::atomic<bool> s_logged{false};
-        if (!s_logged.exchange(true)) {
-            printf("[BYPASS 25A3E0] GS state-block setup bypassed (returns 0)\n");
+    runtime.registerFunction(0x25A3E0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t obj = GPR_U32(ctx, 4);
+        const uint32_t returnPc = GPR_U32(ctx, 31);
+        if (n < 16u) {
+            printf("[DIAG sub_25A3E0:pre] n=%u obj=0x%08X ra=0x%08X obj[38]=0x%08X\n",
+                   n, obj, returnPc,
+                   (obj >= 0x00100000u && obj + 0x40u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x38u) : 0u);
             fflush(stdout);
         }
-        SET_GPR_S32(ctx, 2, 0);        // $v0 = 0
-        ctx->pc = GPR_U32(ctx, 31);    // jr $ra
+        ctx->pc = 0x25A3E0u;
+        for (uint32_t dispatchCount = 0u; dispatchCount < 16384u; ++dispatchCount) {
+            const uint32_t entryPc = ctx->pc;
+            if (entryPc >= 0x0025A3E0u && entryPc < 0x0025A710u) {
+                sub_0025A3E0_0x25a3e0(rdram, ctx, runtime);
+            } else if (runtime->hasFunction(entryPc)) {
+                auto targetFn = runtime->lookupFunction(entryPc);
+                targetFn(rdram, ctx, runtime);
+            } else {
+                printf("[DIAG sub_25A3E0:missing] n=%u pc=0x%08X return=0x%08X\n", n, entryPc, returnPc);
+                break;
+            }
+            if (ctx->pc == returnPc) {
+                break;
+            }
+        }
+        if (n < 16u) {
+            const uint32_t list = (obj >= 0x00100000u && obj + 0x40u < 0x02000000u) ? Ps2FastRead32(rdram, obj + 0x38u) : 0u;
+            printf("[DIAG sub_25A3E0:post] n=%u rv=0x%08X pc=0x%08X obj[38]=0x%08X list0=0x%08X list4=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc, list,
+                   (list >= 0x00100000u && list + 8u < 0x02000000u) ? Ps2FastRead32(rdram, list + 0u) : 0u,
+                   (list >= 0x00100000u && list + 8u < 0x02000000u) ? Ps2FastRead32(rdram, list + 4u) : 0u);
+            fflush(stdout);
+        }
     });
 
     // --- 0x237640  boot subinit dispatch — diagnostic wrapper ---
@@ -2602,7 +4383,7 @@ int main(int argc, char* argv[])
     //
     // Real code flow inside sub_237640:
     //   1. jal func_237A40($a0=modBase)          — returns 1, no side-effects
-    //   2. JALR vtable[0x9C] via modBase+0x27C   — previously returned 0 (FFF400), now 1 (FFF500)
+    //   2. JALR vtable[0x9C] via modBase+0x27C   — previously returned 0 (FFF400), now 1 (FFF510)
     //   3. If non-zero → label_2376a0:
     //        func_2E8D90(0x510) → func_259E00(rv) → WRITE32(0x443A60,rv) → func_25A3E0(rv)
     //        → func_13FDA0(modBase, buf)           ← GOAL: render infrastructure init
@@ -2628,11 +4409,162 @@ int main(int argc, char* argv[])
     // First action: WRITE32(modBase+0x22C, 1) — "initialized" flag.
     // Then initialises many module/render slots via repeated func_2E8D90 + func_141300 calls.
     // This wrapper confirms whether the function is reached and whether it returns normally.
+    extern void sub_00141300_0x141300(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_00141960_0x141960(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_00102BE0_0x102be0(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_00102DE0_0x102de0(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_00141C20_0x141c20(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_002329A0_0x2329a0(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_00232AA0_0x232aa0(uint8_t*, R5900Context*, PS2Runtime*);
+    extern void sub_00232D40_0x232d40(uint8_t*, R5900Context*, PS2Runtime*);
+
+    runtime.registerFunction(0x141300u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t a0 = GPR_U32(ctx, 4);
+        if (n < 64u) {
+            printf("[DIAG sub_141300:pre] n=%u a0=0x%08X a1=0x%08X ra=0x%08X\n",
+                   n, a0, GPR_U32(ctx, 5), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        ctx->pc = 0x141300u;
+        sub_00141300_0x141300(rdram, ctx, runtime);
+        if (n < 64u) {
+            printf("[DIAG sub_141300:post] n=%u rv=0x%08X pc=0x%08X slot8=0x%08X slot10=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (a0 >= 0x100000u && a0 + 0x14u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 8u) : 0u,
+                   (a0 >= 0x100000u && a0 + 0x14u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0x10u) : 0u);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x141960u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t a0 = GPR_U32(ctx, 4);
+        const uint32_t a1 = GPR_U32(ctx, 5);
+        if (n < 64u) {
+            printf("[DIAG sub_141960:pre] n=%u a0=0x%08X a1=0x%08X a2=0x%08X ra=0x%08X\n",
+                   n, a0, a1, GPR_U32(ctx, 6), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        ctx->pc = 0x141960u;
+        sub_00141960_0x141960(rdram, ctx, runtime);
+        if (n < 64u) {
+            printf("[DIAG sub_141960:post] n=%u rv=0x%08X pc=0x%08X head=0x%08X node1c=0x%08X node20=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (a0 >= 0x100000u && a0 + 0x20u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0x18u) : 0u,
+                   (a1 >= 0x100000u && a1 + 0x24u < 0x02000000u) ? Ps2FastRead32(rdram, a1 + 0x1Cu) : 0u,
+                   (a1 >= 0x100000u && a1 + 0x24u < 0x02000000u) ? Ps2FastRead32(rdram, a1 + 0x20u) : 0u);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x102BE0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t a0 = GPR_U32(ctx, 4);
+        if (n < 32u) {
+            printf("[DIAG sub_102BE0:pre] n=%u a0=0x%08X ra=0x%08X\n", n, a0, GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        ctx->pc = 0x102BE0u;
+        sub_00102BE0_0x102be0(rdram, ctx, runtime);
+        if (n < 32u) {
+            printf("[DIAG sub_102BE0:post] n=%u rv=0x%08X pc=0x%08X fieldA0=0x%08X fieldA4=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (a0 >= 0x100000u && a0 + 0xA8u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0xA0u) : 0u,
+                   (a0 >= 0x100000u && a0 + 0xA8u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0xA4u) : 0u);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x102DE0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t a0 = GPR_U32(ctx, 4);
+        if (n < 32u) {
+            printf("[DIAG sub_102DE0:pre] n=%u a0=0x%08X a1=0x%08X a2=0x%08X ra=0x%08X\n",
+                   n, a0, GPR_U32(ctx, 5), GPR_U32(ctx, 6), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        ctx->pc = 0x102DE0u;
+        sub_00102DE0_0x102de0(rdram, ctx, runtime);
+        if (n < 32u) {
+            printf("[DIAG sub_102DE0:post] n=%u rv=0x%08X pc=0x%08X fieldA0=0x%08X fieldA4=0x%08X fieldB0=0x%08X\n",
+                   n, GPR_U32(ctx, 2), ctx->pc,
+                   (a0 >= 0x100000u && a0 + 0xB4u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0xA0u) : 0u,
+                   (a0 >= 0x100000u && a0 + 0xB4u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0xA4u) : 0u,
+                   (a0 >= 0x100000u && a0 + 0xB4u < 0x02000000u) ? Ps2FastRead32(rdram, a0 + 0xB0u) : 0u);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x141C20u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 32u) {
+            printf("[DIAG sub_141C20:pre] n=%u a0=0x%08X ra=0x%08X\n", n, GPR_U32(ctx, 4), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        ctx->pc = 0x141C20u;
+        sub_00141C20_0x141c20(rdram, ctx, runtime);
+        if (n < 32u) {
+            printf("[DIAG sub_141C20:post] n=%u rv=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x232AA0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t returnPc = GPR_U32(ctx, 31);
+        if (n < 32u) {
+            printf("[DIAG sub_232AA0:pre] n=%u a0=0x%08X a1=0x%08X ra=0x%08X\n",
+                   n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), returnPc);
+            fflush(stdout);
+        }
+        ctx->pc = 0x232AA0u;
+        for (uint32_t dispatchCount = 0u; dispatchCount < 8192u; ++dispatchCount) {
+            const uint32_t entryPc = ctx->pc;
+            if (entryPc >= 0x00232AA0u && entryPc < 0x00232B60u) {
+                sub_00232AA0_0x232aa0(rdram, ctx, runtime);
+            } else if (runtime->hasFunction(entryPc)) {
+                auto targetFn = runtime->lookupFunction(entryPc);
+                targetFn(rdram, ctx, runtime);
+            } else {
+                break;
+            }
+            if (ctx->pc == returnPc) {
+                break;
+            }
+        }
+        if (n < 32u) {
+            printf("[DIAG sub_232AA0:post] n=%u rv=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            fflush(stdout);
+        }
+    });
+
+    runtime.registerFunction(0x232D40u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        static std::atomic<uint32_t> s_n{0};
+        const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 32u) {
+            printf("[DIAG sub_232D40:pre] n=%u a0=0x%08X ra=0x%08X\n", n, GPR_U32(ctx, 4), GPR_U32(ctx, 31));
+            fflush(stdout);
+        }
+        ctx->pc = 0x232D40u;
+        sub_00232D40_0x232d40(rdram, ctx, runtime);
+        if (n < 32u) {
+            printf("[DIAG sub_232D40:post] n=%u rv=0x%08X pc=0x%08X\n", n, GPR_U32(ctx, 2), ctx->pc);
+            fflush(stdout);
+        }
+    });
+
     runtime.registerFunction(0x13FDA0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
         printf("[DIAG sub_13FDA0] ENTRY a0=0x%08X a1=0x%08X\n", GPR_U32(ctx, 4), GPR_U32(ctx, 5));
         fflush(stdout);
         sub_0013FDA0_0x13fda0(rdram, ctx, runtime);
-        printf("[DIAG sub_13FDA0] EXIT rv=0x%08X\n", GPR_U32(ctx, 2));
+        printf("[DIAG sub_13FDA0] EXIT rv=0x%08X pc=0x%08X ra=0x%08X\n", GPR_U32(ctx, 2), ctx->pc, GPR_U32(ctx, 31));
         fflush(stdout);
     });
 
@@ -2685,30 +4617,57 @@ int main(int argc, char* argv[])
             //
             // This only fires once (n==0); subsequent iterator entries are no-ops.
             if (n == 0u && s0 != 0u && s1 > s0 && (s1 - s0) < 0x400u && s1 < 0x2000000u) {
-                extern void sub_0031D200_0x31d200(uint8_t*, R5900Context*, PS2Runtime*);
+                runtime->registerFunction(0x003CA9F0u, +[](uint8_t* cbRdram, R5900Context* cbCtx, PS2Runtime*) {
+                    const uint32_t oldHead = Ps2FastRead32(cbRdram, 0x446AD0u);
+                    Ps2FastWrite32(cbRdram, 0x00443190u, 0u);
+                    Ps2FastWrite32(cbRdram, 0x00443194u, 0u);
+                    Ps2FastWrite32(cbRdram, 0x00443180u, oldHead);
+                    Ps2FastWrite32(cbRdram, 0x00443184u, 0x00282280u);
+                    Ps2FastWrite32(cbRdram, 0x00443188u, 0x00443190u);
+                    Ps2FastWrite32(cbRdram, 0x446AD0u, 0x00443180u);
+                    cbCtx->pc = GPR_U32(cbCtx, 31);
+                    printf("[BootListThunk] entry=0x003CA9F0 node=0x00443180 fn=0x00282280 data=0x00443190 oldHead=0x%08X newHead=0x%08X\n",
+                           oldHead, Ps2FastRead32(cbRdram, 0x446AD0u));
+                    fflush(stdout);
+                });
+                runtime->registerFunction(0x003CB140u, +[](uint8_t* cbRdram, R5900Context* cbCtx, PS2Runtime*) {
+                    const uint32_t oldHead = Ps2FastRead32(cbRdram, 0x446AD0u);
+                    Ps2FastWrite32(cbRdram, 0x00443970u, 0u);
+                    Ps2FastWrite32(cbRdram, 0x00443974u, 0u);
+                    Ps2FastWrite32(cbRdram, 0x00443960u, oldHead);
+                    Ps2FastWrite32(cbRdram, 0x00443964u, 0x002A3180u);
+                    Ps2FastWrite32(cbRdram, 0x00443968u, 0x00443970u);
+                    Ps2FastWrite32(cbRdram, 0x446AD0u, 0x00443960u);
+                    cbCtx->pc = GPR_U32(cbCtx, 31);
+                    printf("[BootListThunk] entry=0x003CB140 node=0x00443960 fn=0x002A3180 data=0x00443970 oldHead=0x%08X newHead=0x%08X\n",
+                           oldHead, Ps2FastRead32(cbRdram, 0x446AD0u));
+                    fflush(stdout);
+                });
+
                 const uint32_t count    = (s1 - s0) / 4u;
-                uint32_t registeredNow  = 0u;
+                uint32_t decodedNow     = 0u;
                 uint32_t alreadyKnown   = 0u;
-                uint32_t outOfRange     = 0u;
-                printf("[TRACE iter 0x2E9210] dump+register array @0x%08X..0x%08X (%u entries):\n", s0, s1, count);
+                uint32_t missingOrOor   = 0u;
+                printf("[TRACE iter 0x2E9210] dump+register decoded array @0x%08X..0x%08X (%u entries):\n", s0, s1, count);
                 for (uint32_t i = 0; i < count; ++i) {
                     const uint32_t addr = s0 + i * 4u;
                     const uint32_t ptr  = *(uint32_t*)(rdram + addr);
                     const bool inRange  = (ptr >= 0x31D200u && ptr < 0x3D5A00u);
                     const bool already  = runtime->hasFunction(ptr);
-                    if (inRange && !already) {
-                        runtime->registerFunction(ptr, sub_0031D200_0x31d200);
-                        ++registeredNow;
+                    const bool decoded  = (ptr == 0x003CA9F0u || ptr == 0x003CB140u);
+                    if (decoded) {
+                        ++decodedNow;
                     } else if (already) {
                         ++alreadyKnown;
                     } else {
-                        ++outOfRange;
+                        ++missingOrOor;
                     }
                     printf("  [%2u] @0x%08X -> 0x%08X %s\n", i, addr, ptr,
-                           inRange ? (already ? "(already)" : "(REGISTERED)") : "(out-of-range)");
+                           decoded ? "(decoded boot-list thunk)" :
+                           (inRange ? (already ? "(already registered)" : "(missing generated label)") : "(out-of-range)"));
                 }
-                printf("[TRACE iter 0x2E9210] registered=%u already=%u oor=%u total=%u\n",
-                       registeredNow, alreadyKnown, outOfRange, count);
+                printf("[TRACE iter 0x2E9210] decoded=%u already=%u missing_or_oor=%u total=%u\n",
+                       decodedNow, alreadyKnown, missingOrOor, count);
                 fflush(stdout);
             }
             ctx->pc = 0x2e9210u;
@@ -2760,6 +4719,7 @@ int main(int argc, char* argv[])
     // that visible at the call site.
     {
         extern void sub_002EADD0_0x2eadd0(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002E90F0_0x2e90f0(uint8_t*, R5900Context*, PS2Runtime*);
         runtime.registerFunction(0x2EADD0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
             static std::atomic<uint64_t> s_n{0};
             const auto n = s_n.fetch_add(1u, std::memory_order_relaxed);
@@ -2773,11 +4733,79 @@ int main(int argc, char* argv[])
                 }
                 printf("[TRACE listWalker 0x2EADD0] call#%llu head=0x%08X depth=%u ra=0x%08X\n",
                        (unsigned long long)n, head, depth, GPR_U32(ctx, 31));
+                cur = head;
+                for (uint32_t i = 0u; i < 12u && cur != 0u && cur < 0x2000000u; ++i) {
+                    const uint32_t next = *(uint32_t*)(rdram + cur + 0u);
+                    const uint32_t fn   = *(uint32_t*)(rdram + cur + 4u);
+                    const uint32_t data = *(uint32_t*)(rdram + cur + 8u);
+                    printf("  [listNode%u] node=0x%08X next=0x%08X fn=0x%08X data=0x%08X\n",
+                           i, cur, next, fn, data);
+                    cur = next;
+                }
                 fflush(stdout);
             }
             ctx->pc = 0x2EADD0u;
             sub_002EADD0_0x2eadd0(rdram, ctx, runtime);
         });
+        runtime.registerFunction(0x2E917Cu, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint64_t> s_n{0};
+            const uint64_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t node = GPR_U32(ctx, 3);
+            uint32_t next = 0u;
+            uint32_t fn = 0u;
+            uint32_t data = 0u;
+            if (node != 0u && node < 0x02000000u) {
+                next = Ps2FastRead32(rdram, node + 0u);
+                fn   = Ps2FastRead32(rdram, node + 4u);
+                data = Ps2FastRead32(rdram, node + 8u);
+            }
+            if (n < 96u || fn == 1u || fn >= 0x02000000u || (n % 600u) == 0u) {
+                printf("[TRACE listWalker 0x2E917C] #%llu node=0x%08X next=0x%08X fn=0x%08X data=0x%08X head=0x%08X ra=0x%08X sp=0x%08X\n",
+                       (unsigned long long)n, node, next, fn, data,
+                       Ps2FastRead32(rdram, 0x446AD0u), GPR_U32(ctx, 31), GPR_U32(ctx, 29));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2E917Cu;
+            sub_002E90F0_0x2e90f0(rdram, ctx, runtime);
+        });
+    }
+
+    // Trace the real boot list-node callbacks. The list walker calls these via
+    // jalr, so if any callback parks or silently fails we need its exact state.
+    {
+        extern void sub_0024CF80_0x24cf80(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_00282280_0x282280(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_00299190_0x299190(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_0029E190_0x29e190(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002A3140_0x2a3140(uint8_t*, R5900Context*, PS2Runtime*);
+
+#define RR_TRACE_LIST_FN(addr, tag, fn) \
+        runtime.registerFunction((addr), +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) { \
+            static std::atomic<uint64_t> s_n{0}; \
+            const uint64_t n = s_n.fetch_add(1u, std::memory_order_relaxed); \
+            const uint32_t entryPc = (addr); \
+            if (n < 16u) { \
+                printf("[TRACE listFn " tag ":entry] #%llu a0=0x%08X a1=0x%08X ra=0x%08X sp=0x%08X\n", \
+                       (unsigned long long)n, GPR_U32(ctx, 4), GPR_U32(ctx, 5), GPR_U32(ctx, 31), GPR_U32(ctx, 29)); \
+                trace_boot_list_state(rdram, tag ":pre", n); \
+                fflush(stdout); \
+            } \
+            ctx->pc = entryPc; \
+            fn(rdram, ctx, runtime); \
+            if (n < 16u) { \
+                printf("[TRACE listFn " tag ":exit] #%llu pc=0x%08X v0=0x%08X ra=0x%08X\n", \
+                       (unsigned long long)n, ctx->pc, GPR_U32(ctx, 2), GPR_U32(ctx, 31)); \
+                trace_boot_list_state(rdram, tag ":post", n); \
+                fflush(stdout); \
+            } \
+        })
+
+        RR_TRACE_LIST_FN(0x24D390u, "24D390", sub_0024CF80_0x24cf80);
+        RR_TRACE_LIST_FN(0x282280u, "282280", sub_00282280_0x282280);
+        RR_TRACE_LIST_FN(0x299190u, "299190", sub_00299190_0x299190);
+        RR_TRACE_LIST_FN(0x29E200u, "29E200", sub_0029E190_0x29e190);
+        RR_TRACE_LIST_FN(0x2A3180u, "2A3180", sub_002A3140_0x2a3140);
+#undef RR_TRACE_LIST_FN
     }
 
     // --- 0x302DF0  moduleManager_mainLoop — runtime trace ---
@@ -2799,8 +4827,109 @@ int main(int argc, char* argv[])
                        (unsigned long long)n, GPR_U32(ctx, 31), GPR_U32(ctx, 4));
                 fflush(stdout);
             }
-            ctx->pc = 0x302DF0u;
+            if (ctx->pc < 0x302DF0u || ctx->pc >= 0x302E10u) {
+                ctx->pc = 0x302DF0u;
+            }
             sub_00302DF0_0x302df0(rdram, ctx, runtime);
+        });
+    }
+
+    // Trace the natural module dispatch and IOP module-load handshake. These
+    // are observation-only wrappers around the generated functions.
+    {
+        extern void sub_00308B00_0x308b00(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_00308958_0x308958(uint8_t*, R5900Context*, PS2Runtime*);
+        extern void sub_002FDB48_0x2fdb48(uint8_t*, R5900Context*, PS2Runtime*);
+
+        runtime.registerFunction(0x308B00u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t modTable = Ps2FastRead32(rdram, 0x38544Cu);
+            const uint32_t stateTable = (modTable >= 0x00100000u && modTable < 0x02000000u)
+                ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+                : 0u;
+            const uint32_t state6 = (stateTable >= 0x00100000u && stateTable + 0x18u < 0x02000000u)
+                ? Ps2FastRead32(rdram, stateTable + 0x18u)
+                : 0u;
+            if (n < 24u || (n % 600u) == 0u) {
+                printf("[TRACE 308B00:pre] n=%u a0=0x%08X ra=0x%08X mt=0x%08X mt0=0x%08X st=0x%08X st6=0x%08X frame=0x%08X\n",
+                       n, GPR_U32(ctx, 4), GPR_U32(ctx, 31), modTable,
+                       (modTable >= 0x00100000u && modTable < 0x02000000u) ? Ps2FastRead32(rdram, modTable) : 0u,
+                       stateTable, state6, Ps2FastRead32(rdram, 0x384670u));
+                fflush(stdout);
+            }
+            ctx->pc = 0x308B00u;
+            sub_00308B00_0x308b00(rdram, ctx, runtime);
+            if (n < 24u || (n % 600u) == 0u) {
+                const uint32_t mt2 = Ps2FastRead32(rdram, 0x38544Cu);
+                const uint32_t st2 = (mt2 >= 0x00100000u && mt2 < 0x02000000u)
+                    ? Ps2FastRead32(rdram, mt2 + 0x1D4u)
+                    : 0u;
+                printf("[TRACE 308B00:post] n=%u pc=0x%08X v0=0x%08X mt0=0x%08X st6=0x%08X frame=0x%08X\n",
+                       n, ctx->pc, GPR_U32(ctx, 2),
+                       (mt2 >= 0x00100000u && mt2 < 0x02000000u) ? Ps2FastRead32(rdram, mt2) : 0u,
+                       (st2 >= 0x00100000u && st2 + 0x18u < 0x02000000u) ? Ps2FastRead32(rdram, st2 + 0x18u) : 0u,
+                       Ps2FastRead32(rdram, 0x384670u));
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x308958u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t modTable = GPR_U32(ctx, 4);
+            const uint32_t module = GPR_U32(ctx, 5);
+            const uint32_t stateTable = (modTable >= 0x00100000u && modTable < 0x02000000u)
+                ? Ps2FastRead32(rdram, modTable + 0x1D4u)
+                : 0u;
+            const uint32_t stateValue = (stateTable >= 0x00100000u && stateTable + module * 4u < 0x02000000u)
+                ? Ps2FastRead32(rdram, stateTable + module * 4u)
+                : 0u;
+            const bool stateInteresting = (stateValue != 0u && stateValue != 0xFFFFFFFFu);
+            if (module == 6u && (n < 64u || (n % 600u) == 0u || stateInteresting)) {
+                printf("[TRACE 308958:pre] n=%u module=%u ra=0x%08X mt=0x%08X mt0=0x%08X st=0x%08X state=0x%08X frame=0x%08X\n",
+                       n, module, GPR_U32(ctx, 31), modTable,
+                       (modTable >= 0x00100000u && modTable < 0x02000000u) ? Ps2FastRead32(rdram, modTable) : 0u,
+                       stateTable, stateValue, Ps2FastRead32(rdram, 0x384670u));
+                fflush(stdout);
+            }
+            ctx->pc = 0x308958u;
+            sub_00308958_0x308958(rdram, ctx, runtime);
+            if (module == 6u && (n < 64u || (n % 600u) == 0u || stateInteresting)) {
+                const uint32_t mt2 = GPR_U32(ctx, 16);
+                const uint32_t st2 = (mt2 >= 0x00100000u && mt2 < 0x02000000u)
+                    ? Ps2FastRead32(rdram, mt2 + 0x1D4u)
+                    : stateTable;
+                printf("[TRACE 308958:post] n=%u pc=0x%08X v0=0x%08X mt0=0x%08X state=0x%08X frame=0x%08X\n",
+                       n, ctx->pc, GPR_U32(ctx, 2),
+                       (mt2 >= 0x00100000u && mt2 < 0x02000000u) ? Ps2FastRead32(rdram, mt2) : 0u,
+                       (st2 >= 0x00100000u && st2 + 0x18u < 0x02000000u) ? Ps2FastRead32(rdram, st2 + 0x18u) : 0u,
+                       Ps2FastRead32(rdram, 0x384670u));
+                fflush(stdout);
+            }
+        });
+
+        runtime.registerFunction(0x2FDB48u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t pathAddr = GPR_U32(ctx, 4);
+            const uint32_t argAddr = GPR_U32(ctx, 5);
+            if (n < 32u) {
+                printf("[TRACE 2FDB48:pre] n=%u path=0x%08X '%s' args=0x%08X ra=0x%08X sif4=0x%08X ac00=0x%08X ac14=0x%08X\n",
+                       n, pathAddr, guest_cstr(rdram, pathAddr).c_str(), argAddr, GPR_U32(ctx, 31),
+                       Ps2FastRead32(rdram, 0x1000F230u), Ps2FastRead32(rdram, 0x44AC00u),
+                       Ps2FastRead32(rdram, 0x44AC14u));
+                fflush(stdout);
+            }
+            ctx->pc = 0x2FDB48u;
+            sub_002FDB48_0x2fdb48(rdram, ctx, runtime);
+            if (n < 32u) {
+                printf("[TRACE 2FDB48:post] n=%u pc=0x%08X v0=0x%08X ac00=0x%08X ac04=0x%08X ac08=0x%08X ac10=0x%08X ac14=0x%08X\n",
+                       n, ctx->pc, GPR_U32(ctx, 2), Ps2FastRead32(rdram, 0x44AC00u),
+                       Ps2FastRead32(rdram, 0x44AC04u), Ps2FastRead32(rdram, 0x44AC08u),
+                       Ps2FastRead32(rdram, 0x44AC10u), Ps2FastRead32(rdram, 0x44AC14u));
+                fflush(stdout);
+            }
         });
     }
 
@@ -2827,6 +4956,7 @@ int main(int argc, char* argv[])
     //     which writes 22 to modTable[0] and unblocks the boot loop.
     runtime.registerFunction(0x00FFF200u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
         static std::atomic<uint32_t> s_n{0};
+        static std::atomic<bool> s_setGameStateQueued{false};
         const uint32_t n = s_n.fetch_add(1, std::memory_order_relaxed);
 
         const uint32_t stateTablePtr = *(const uint32_t*)(rdram + 0x385334u);
@@ -2848,10 +4978,13 @@ int main(int argc, char* argv[])
             // (0x2FDDF8), which happens once IOP/SIF callbacks fire.  Keep
             // gs_initState (0x251B10) in place until that happens.
             if (valid) {
-                *(uint32_t*)(rdram + stateTablePtr + 24u) = 0xFFFFFFFFu; // state[6] = -1 = done
-            }
-            if (n == 0u) {
-                printf("[modUpdate6] IOP done: state[6]=-1 (module 6 advancing to done; 0x384670 unchanged)\n");
+                if (!s_setGameStateQueued.exchange(true, std::memory_order_acq_rel)) {
+                    *(uint32_t*)(rdram + stateTablePtr + 24u) = 0x002FDDF8u;
+                    printf("[modUpdate6] IOP done: queued state[6]=setGameState(0x2FDDF8)\n");
+                } else {
+                    *(uint32_t*)(rdram + stateTablePtr + 24u) = 0xFFFFFFFFu;
+                    printf("[modUpdate6] setGameState already queued; state[6]=-1\n");
+                }
                 fflush(stdout);
             }
         } else {
@@ -2944,17 +5077,26 @@ int main(int argc, char* argv[])
         constexpr uint32_t kPoolBase  = 0x4F0000u;
         constexpr uint32_t kPoolSlots = 128u;
 
-        auto synthPrepend = +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* /*runtime*/) {
+        auto bootCallbackInterp = +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
             if (!rdram || !ctx) return;
             const uint32_t cbPc = ctx->pc;
             // Only synth-prepend for addresses in the observed boot-init
             // callback array range (0x3C9F70..0x3CC3D0).  Other addresses
             // in the dataSegNoop range get the original noop behaviour.
-            const bool inCallbackArray = (cbPc >= 0x3C9F70u && cbPc <= 0x3CC3D0u);
+            const bool inCallbackArray = (cbPc >= 0x3C9EF0u && cbPc <= 0x3CC3D0u);
             if (!inCallbackArray) {
                 ctx->pc = GPR_U32(ctx, 31);
                 return;
             }
+            static std::atomic<uint64_t> s_interpN{0};
+            const auto interpN = s_interpN.fetch_add(1u, std::memory_order_relaxed);
+            if (interpN < 16u || (interpN % 200u) == 0u) {
+                printf("[BootCallbackInterp] n=%llu pc=0x%08X ra=0x%08X head=0x%08X\n",
+                       (unsigned long long)interpN, cbPc, GPR_U32(ctx, 31), Ps2FastRead32(rdram, 0x446AD0u));
+                fflush(stdout);
+            }
+            interpretMipsKseg0(rdram, ctx, runtime, cbPc);
+            return;
             // Monotonic counter for pool slot — avoids pc-hash collisions.
             // Pool is 1024 slots × 12 bytes = 12KB at 0x4F0000..0x4F3000.
             // Wraps at 1024; the 66 real callbacks fire once each per boot
@@ -2998,7 +5140,9 @@ int main(int argc, char* argv[])
         static const uint32_t kSkipPcs[] = {
             0x003C9F70u, // [0] partial (matrix only)
             0x003CA620u, // [11] prepender (matrix + func_299130)
+            0x003CA6D0u, // [12] prepender (matrix + func_24CF80)
             0x003CA9F0u, // [18] prepender
+            0x003CAFA0u, // [30] prepender (2x 24A8E0 + func_299130)
             0x003CB140u, // [34] prepender
             0x003CA350u, // [7]  no-op: handle-allocator stub (zeros to slots, equivalent to alloc failure)
             0x003CA780u, // [13] partial: CDVD-stub-aware (skips capA/capB clears)
@@ -3019,12 +5163,106 @@ int main(int argc, char* argv[])
         };
         static std::unordered_set<uint32_t> s_skip(std::begin(kSkipPcs), std::end(kSkipPcs));
         for (uint32_t addr = 0x3C7B80u; addr < 0x3CE000u; addr += 4u) {
-            if (s_skip.count(addr)) continue;
-            runtime.registerFunction(addr, synthPrepend);
+            if (s_skip.find(addr) != s_skip.end()) {
+                continue;
+            }
+            runtime.registerFunction(addr, bootCallbackInterp);
         }
-        std::cout << "[Bootstrap] synthPrepend installed for 0x3C7B80..0x3CE000 "
-                     "(restricted to 0x3C9F70..0x3CC3D0 array; pool 0x4F0000+, 1024 slots, fn=0xFFF600)" << std::endl;
+        std::cout << "[Bootstrap] boot callback interpreter installed for 0x3C7B80..0x3CE000 "
+                     "(restricted to 0x3C9F70..0x3CC3D0 array; hand-decoded callbacks preserved)" << std::endl;
     }
+
+    if (cli.realAssetPath) {
+        extern void sub_0031D200_0x31d200(uint8_t*, R5900Context*, PS2Runtime*);
+        auto realBootCallback = +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+            static std::atomic<uint32_t> s_n{0};
+            const uint32_t n = s_n.fetch_add(1u, std::memory_order_relaxed);
+            const uint32_t entryPc = ctx ? ctx->pc : 0u;
+            if (n < 80u || (n % 200u) == 0u) {
+                printf("[RealBootCallback] n=%u pc=0x%08X ra=0x%08X head=0x%08X\n",
+                       n, entryPc, ctx ? GPR_U32(ctx, 31) : 0u,
+                       rdram ? Ps2FastRead32(rdram, 0x446AD0u) : 0u);
+                fflush(stdout);
+            }
+            // The chunked sub_31D200 dispatcher currently covers 0x31D200..0x353728.
+            // These boot callbacks live in the later 0x3Cxxxx part of the same
+            // analyzer range, so execute them directly from the ELF bytes.
+            interpretMipsKseg0(rdram, ctx, runtime, entryPc);
+            if (ctx && ctx->pc == entryPc) {
+                ctx->pc = GPR_U32(ctx, 31);
+            }
+            if (n < 80u || (n % 200u) == 0u) {
+                printf("[RealBootCallback] n=%u exit pc=0x%08X v0=0x%08X head=0x%08X\n",
+                       n, ctx ? ctx->pc : 0u, ctx ? GPR_U32(ctx, 2) : 0u,
+                       rdram ? Ps2FastRead32(rdram, 0x446AD0u) : 0u);
+                fflush(stdout);
+            }
+        };
+        static const uint32_t kRealBootCallbackPcs[] = {
+            0x003C9EF0u, 0x003C9F70u, 0x003CA020u, 0x003CA0A0u,
+            0x003CA120u, 0x003CA1D0u, 0x003CA250u, 0x003CA2D0u,
+            0x003CA350u, 0x003CA390u, 0x003CA410u, 0x003CA490u,
+            0x003CA620u, 0x003CA6D0u, 0x003CA780u, 0x003CA7F0u,
+            0x003CA870u, 0x003CA8F0u, 0x003CA970u, 0x003CA9F0u,
+            0x003CAA20u, 0x003CAAA0u, 0x003CAB20u, 0x003CABA0u,
+            0x003CAC20u, 0x003CACA0u, 0x003CAD20u, 0x003CADA0u,
+            0x003CAE20u, 0x003CAEA0u, 0x003CAF20u, 0x003CAFA0u,
+            0x003CAFF0u, 0x003CB040u, 0x003CB0C0u, 0x003CB140u,
+            0x003CB170u, 0x003CB1F0u, 0x003CB270u, 0x003CB2F0u,
+            0x003CB300u, 0x003CB380u, 0x003CB400u, 0x003CB4A0u,
+            0x003CB790u, 0x003CB8C0u, 0x003CB940u, 0x003CBA10u,
+            0x003CBAB0u, 0x003CBB30u, 0x003CBBB0u, 0x003CBC30u,
+            0x003CBCB0u, 0x003CBD30u, 0x003CBDB0u, 0x003CBE30u,
+            0x003CBEB0u, 0x003CBF30u, 0x003CBFB0u, 0x003CBFE0u,
+            0x003CC060u, 0x003CC0E0u, 0x003CC160u, 0x003CC1E0u,
+            0x003CC2D0u, 0x003CC350u, 0x003CC3D0u,
+        };
+        for (uint32_t pc : kRealBootCallbackPcs) {
+            runtime.registerFunction(pc, realBootCallback);
+        }
+        std::cout << "[Bootstrap] real-asset-path: boot callback table interprets real ELF callback code"
+                  << std::endl;
+    }
+
+    // --- 0x2EADE0  boot callback table runner ---
+    //
+    // The native function only sets up a0=0x3CC450, a1=0x3CC650, then
+    // tail-jumps to the generic callback iterator at 0x2E91F0. In practice
+    // that iterator can preempt before it reaches the hand-translated
+    // 0x3C9F70..0x3CC3D0 callback entries, leaving the boot list at 0x446AD0
+    // empty. This wrapper performs the same bounded table walk directly so
+    // every registered callback gets its normal one-shot boot opportunity.
+    runtime.registerFunction(0x2EADE0u, +[](uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+        if (!rdram || !ctx || !runtime) return;
+        const uint32_t savedRa = GPR_U32(ctx, 31);
+        uint32_t called = 0u;
+        uint32_t missing = 0u;
+        for (uint32_t slot = 0x003CC450u; slot < 0x003CC650u; slot += 4u) {
+            const uint32_t target = Ps2FastRead32(rdram, slot);
+            if (target == 0u) {
+                continue;
+            }
+            auto fn = runtime->lookupFunction(target);
+            if (!fn) {
+                ++missing;
+                continue;
+            }
+            R5900Context cbCtx = *ctx;
+            cbCtx.pc = target;
+            SET_GPR_U32(&cbCtx, 31, 0x00FFF000u);
+            fn(rdram, &cbCtx, runtime);
+            ++called;
+        }
+        const uint32_t head = Ps2FastRead32(rdram, 0x446AD0u);
+        uint32_t depth = 0u;
+        for (uint32_t cur = head; cur != 0u && cur < 0x02000000u && depth < 256u; ++depth) {
+            cur = Ps2FastRead32(rdram, cur);
+        }
+        printf("[BootCallbackRunner 0x2EADE0] called=%u missing=%u head=0x%08X depth=%u -> ra=0x%08X\n",
+               called, missing, head, depth, savedRa);
+        fflush(stdout);
+        ctx->pc = savedRa;
+    });
 
     // --- Load and run ---
 
@@ -3032,6 +5270,16 @@ int main(int argc, char* argv[])
     {
         std::cerr << "Failed to load ELF: " << elfPath << std::endl;
         return 1;
+    }
+
+    {
+        PS2Runtime::IoPaths ioPaths = PS2Runtime::getIoPaths();
+        const std::filesystem::path extractedDisc = std::filesystem::current_path() / "PS2_game";
+        if (std::filesystem::exists(extractedDisc) && std::filesystem::is_directory(extractedDisc)) {
+            ioPaths.cdRoot = extractedDisc;
+            PS2Runtime::setIoPaths(ioPaths);
+            std::cout << "[CDVD] cdRoot = " << ioPaths.cdRoot.string() << std::endl;
+        }
     }
 
     // --- Pre-boot RDRAM initialisation (must happen after loadELF, before run) ---
@@ -3057,17 +5305,18 @@ int main(int argc, char* argv[])
     //   bnez $v0 → false → loop exits → sub_239C40 proceeds to return.
     {
         uint8_t* preRdram = runtime.memory().getRDRAM();
-        const uint32_t modBase   = 0x44F800u;   // above BSS ceiling 0x44F600
-        const uint32_t modVTable = 0x44FB00u;
+        const uint32_t modBase   = 0x01E00000u;
+        const uint32_t modVTable = 0x01E00300u;
         Ps2FastWrite32(preRdram, 0x382B80u,         modBase);
+        Ps2FastWrite32(preRdram, 0x383AD4u,         0x0044F600u);
         Ps2FastWrite32(preRdram, modBase  + 0x27Cu, modVTable);
         Ps2FastWrite32(preRdram, modVTable + 0x30u, 0x00FFF400u); // spin-exit sentinel (returns 0)
-        Ps2FastWrite32(preRdram, modVTable + 0x9Cu, 0x00FFF500u); // init-success sentinel (returns 1) → triggers func_13FDA0 path
+        Ps2FastWrite32(preRdram, modVTable + 0x9Cu, 0x00FFF510u); // init-success sentinel (returns 1) -> triggers func_13FDA0 path
         Ps2FastWrite32(preRdram, modVTable + 0x4Cu, 0x00FFF400u); // spin-exit sentinel (returns 0)
         std::cout << "[PreBoot] Module vtable pre-populated: "
                   << "rdram[0x382B80]=0x" << std::hex << modBase
                   << " vtable=0x" << modVTable
-                  << " (+0x30/+0x4C -> FFF400(ret0), +0x9C -> FFF500(ret1))"
+                  << " (+0x30/+0x4C -> FFF400(ret0), +0x9C -> FFF510(ret1))"
                   << std::dec << std::endl;
     }
 

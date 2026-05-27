@@ -36,6 +36,51 @@ This file is the substitute for asking Steve questions. Every decision that woul
 
 <!-- ENTRIES BELOW THIS LINE — NEWEST FIRST -->
 
+## [2026-05-26 20:55] Cycle 29 phase 1 — real game-asset pixels through GS
+
+**Type:** milestone
+**Cycle:** 29
+
+Added `--asset-proof` mode in `src/main.cpp`. It decodes
+`PS2_game/UI/TEXTURES/LD_UI.PST` directly (PST v1 paletted, CSM1 CLUT
+deswizzle, largest mip 640x448), uploads the resulting RGBA pixels to
+GS VRAM via GIF IMAGE packets, splits the upload below the 16-bit DMA
+QWC ceiling, then explicitly latches the GS host presentation frame.
+
+Proof run:
+- Build: `cmake --build build --config Release --target racer_revenge --parallel`
+- Screenshot run: `logs/asset_proof_split_out.txt`, `logs/asset_proof_split_err.txt`
+- Screenshot: `asset_proof.png`
+- Result: Star Wars Racer Revenge title/loading texture visible from
+  real disc asset data, through GS VRAM/presentation path.
+- `recover-pc` count: 0
+
+This is NOT full boot/gameplay rendering. It is a deliberately isolated
+proof that real game-owned texture pixels can travel through the runtime
+GS path. Default runtime path is unchanged unless `--asset-proof` is
+passed.
+
+## [2026-05-26 20:45] Cycle 29 phase 0 — 0x31D200 forced state is not real game logic
+
+**Type:** blocker-resolved
+**Cycle:** 29
+
+Decoded ELF at `0x31D200`: first block is a tiny bitstream/byte writer
+using `$a0+0x16C8` and `$a0+0x16CC`, then `jr $ra` at `0x31D278`.
+It is not, by itself, a game-state dispatcher.
+
+Added bounded `[D200State:*]` telemetry around the forced frame-state
+call. Smoke log `logs/d200_argprobe_out.txt` shows every forced call
+enters with `a0=0x10000000`, zero decoded buffer fields, returns at
+`pc=0x31D274`, and leaves `0x384670=0x31D200`. `recover-pc` count: 0.
+
+Conclusion: the cycle-28 claim "state=0x31D200 means game logic is
+running" was too strong. The chunked giant range is linkable/callable,
+but force-installing the range's first address as a frame state currently
+executes a helper with an invalid/unproven context. Future work should
+find the real game-state entry/context instead of treating 0x31D200 as
+the state dispatcher.
+
 ## [2026-05-24 18:50] SESSION RESUME — cycle 28 continues
 
 **Type:** session-marker

@@ -34,6 +34,7 @@ HEADER = """\
 #include "ps2_recompiled_stubs.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
+#include "ps2_mips_interp.h"
 #include "sub_0031D200_chunks.h"
 #ifdef PS2_FUNCTION_LOG_TRACKER
 #include "ps2_log.h"
@@ -285,8 +286,12 @@ def main():
 
     # ------------------------------------------------------------------
     # Build exact-PC dispatch table for the master entry function.
-    # For each original switch-case (pc -> lbl), find the chunk.
-    # Also find the chunk for the function's initial entry (label at function start).
+    #
+    # The original recompiler switch only contains analyzer-discovered entry
+    # points.  Racer Revenge also stores callback pointers into the later
+    # sub_31D200 range in data tables (for example 0x3C9EF0..0x3CC2D0). Those
+    # callbacks are registered to this master at runtime, so the master must be
+    # able to dispatch every real label, not only the original switch cases.
     # ------------------------------------------------------------------
     # Initial entry: the function is called with ctx->pc=0x31d200 (its address)
     # label_31d200 should be in label_to_chunk
@@ -298,6 +303,8 @@ def main():
     for pc_hex, lbl_hex in switch_cases.items():
         if lbl_hex in label_to_chunk:
             master_dispatch[pc_hex] = label_to_chunk[lbl_hex]
+    for lbl_hex, chunk_id in label_to_chunk.items():
+        master_dispatch.setdefault(lbl_hex, chunk_id)
     # Also add the function's own start address as an entry
     if initial_label:
         master_dispatch["31d200"] = initial_chunk
@@ -317,7 +324,13 @@ def main():
             mf.write(f"        case 0x{pc_hex}u: sub_0031D200_chunk_{c:04d}(rdram, ctx, runtime); return;\n")
         mf.write("        default: break;\n")
         mf.write("    }\n")
-        mf.write("    // Unknown pc -- return via $ra\n")
+        mf.write("    // Analyzer-discovered entries past the compiled chunk range are still real ELF code.\n")
+        mf.write("    // Interpret them instead of silently returning via $ra.\n")
+        mf.write("    if (ctx->pc >= 0x31d200u && ctx->pc < 0x3d5a00u) {\n")
+        mf.write("        interpretMipsKseg0(rdram, ctx, runtime, ctx->pc);\n")
+        mf.write("        return;\n")
+        mf.write("    }\n")
+        mf.write("    // Unknown pc outside the giant-function range -- return via $ra.\n")
         mf.write("    ctx->pc = GPR_U32(ctx, 31);\n")
         mf.write("}\n")
     print(f"[split] Wrote master: {master_path}")

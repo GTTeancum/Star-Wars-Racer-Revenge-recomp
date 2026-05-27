@@ -1,0 +1,95 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Dispatcher.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Dispatcher.cpp
+index ac429fa..68dfe2e 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Dispatcher.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Dispatcher.cpp
+@@ -1,5 +1,6 @@
+ #include "Common.h"
+ #include "Dispatcher.h"
++#include "RPC.h"
+ #include "System.h"
+ 
+ namespace ps2_syscalls
+@@ -253,6 +254,9 @@ namespace ps2_syscalls
+         case 0x64:
+             FlushCache(rdram, ctx, runtime);
+             return true;
++        case 0x6B:
++            SifLoadModule(rdram, ctx, runtime);
++            return true;
+         case 0x70:
+             GsGetIMR(rdram, ctx, runtime);
+             return true;
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+index f9f26ea..616fd6e 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+@@ -1,6 +1,8 @@
+ #include "Common.h"
+ #include "RPC.h"
+ 
++#include <iostream>
++
+ namespace ps2_syscalls
+ {
+     namespace
+@@ -1151,6 +1153,10 @@ namespace ps2_syscalls
+             }
+         }
+         logSifModuleAction("load", moduleId, modulePath, refs);
++        std::cerr << "[SifLoadModule] id=" << moduleId
++                  << " refs=" << refs
++                  << " path=\"" << modulePath << "\""
++                  << std::endl;
+ 
+         setReturnS32(ctx, moduleId);
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index b0ad598..3062c8c 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1386,6 +1386,45 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+         }
+     }
+ 
++    // VIF1 register reads: return live vif1_regs values instead of
++    // potentially-stale m_ioRegisters copies.  The VIF1 interpreter
++    // updates vif1_regs directly (e.g. MARK VIFcode sets vif1_regs.mark)
++    // without syncing back to m_ioRegisters, so reads must come from here.
++    if (address >= 0x10003C00u && address < 0x10003E00u)
++    {
++        switch (address)
++        {
++        case 0x10003C00u: return vif1_regs.stat;
++        case 0x10003C10u: return vif1_regs.fbrst;
++        case 0x10003C20u: return vif1_regs.err;
++        case 0x10003C30u: return vif1_regs.mark;
++        case 0x10003C40u: return vif1_regs.cycle;
++        case 0x10003C50u: return vif1_regs.mode;
++        case 0x10003C60u: return vif1_regs.num;
++        case 0x10003C70u: return vif1_regs.mask;
++        case 0x10003C80u: return vif1_regs.code;
++        case 0x10003C90u: return vif1_regs.itops;
++        case 0x10003CA0u: return vif1_regs.base;
++        case 0x10003CB0u: return vif1_regs.ofst;
++        case 0x10003CC0u: return vif1_regs.tops;
++        case 0x10003CD0u: return vif1_regs.itop;
++        case 0x10003CE0u: return vif1_regs.top;
++        case 0x10003D00u: return vif1_regs.row[0];
++        case 0x10003D10u: return vif1_regs.row[1];
++        case 0x10003D20u: return vif1_regs.row[2];
++        case 0x10003D30u: return vif1_regs.row[3];
++        case 0x10003D40u: return vif1_regs.col[0];
++        case 0x10003D50u: return vif1_regs.col[1];
++        case 0x10003D60u: return vif1_regs.col[2];
++        case 0x10003D70u: return vif1_regs.col[3];
++        default:
++        {
++            auto dflt = m_ioRegisters.find(address);
++            return (dflt != m_ioRegisters.end()) ? dflt->second : 0u;
++        }
++        }
++    }
++
+     auto it = m_ioRegisters.find(address);
+     if (it != m_ioRegisters.end())
+     {
