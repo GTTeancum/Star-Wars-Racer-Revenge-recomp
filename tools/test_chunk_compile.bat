@@ -8,7 +8,7 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 set PATH=C:\Program Files\LLVM\bin;%PATH%
 
 set ROOT=C:\Programming\GitHub\Star-Wars-Racer-Revenge-recomp
-set OUT=%ROOT%\src\clang_objs_test
+set OUT=%ROOT%\src\clang_objs
 set SRC=%ROOT%\src\generated_chunks
 
 set CLANGFLAGS=/c /Od /bigobj /std:c++20 /EHsc /MD /W0
